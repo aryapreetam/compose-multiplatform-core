@@ -16,6 +16,8 @@
 
 package androidx.compose.ui
 
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.Dispatchers
 import kotlin.time.TimeSource
 
 internal actual fun areObjectsOfSameType(a: Any, b: Any): Boolean {
@@ -27,4 +29,7 @@ private val markNow = TimeSource.Monotonic.markNow()
 internal actual fun currentTimeMillis(): Long {
     return markNow.elapsedNow().inWholeMilliseconds
 }
+
+internal actual val PostDelayedDispatcher: CoroutineContext
+    get() = Dispatchers.Main
 

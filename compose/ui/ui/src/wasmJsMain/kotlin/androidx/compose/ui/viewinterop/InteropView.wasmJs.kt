@@ -21,6 +21,8 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import org.w3c.dom.HTMLElement
 
+private val NoOpCallback: Any.() -> Unit = {}
+
 /**
  * Compose an [HTMLElement] of class [T] into the UI hierarchy.
  *
@@ -49,8 +51,8 @@ import org.w3c.dom.HTMLElement
 fun <T : HTMLElement> WebElementView(
     factory: () -> T,
     modifier: Modifier = Modifier,
-    update: (T) -> Unit = NoOp,
-    onRelease: (T) -> Unit = NoOp,
+    update: (T) -> Unit = NoOpCallback,
+    onRelease: (T) -> Unit = NoOpCallback,
     onReset: ((T) -> Unit)? = null,
 ) {
     InternalWebElementView(
@@ -60,4 +62,15 @@ fun <T : HTMLElement> WebElementView(
         onRelease = onRelease,
         onReset = onReset,
     )
+}
+
+@Composable
+internal fun <T : HTMLElement> InternalWebElementView(
+    factory: () -> T,
+    modifier: Modifier,
+    update: (T) -> Unit,
+    onRelease: (T) -> Unit,
+    onReset: ((T) -> Unit)?,
+) {
+    // In Luta DOM engine, all elements are real DOM elements
 }

@@ -207,21 +207,24 @@ open class AndroidXComposeMultiplatformExtensionImpl @Inject constructor(
     }
 
     override fun darwin(): Unit = multiplatformExtension.run {
-        macosX64()
-        macosArm64()
-        iosX64("uikitX64")
-        iosArm64("uikitArm64")
-        iosSimulatorArm64("uikitSimArm64")
+        val platforms = ComposeProperties(project).targetPlatforms
+        if (platforms.any { it in ComposePlatforms.DARWIN }) {
+            macosX64()
+            macosArm64()
+            iosX64("uikitX64")
+            iosArm64("uikitArm64")
+            iosSimulatorArm64("uikitSimArm64")
+        }
 
         val nativeMain = getOrCreateNativeMain()
-        val darwinMain = sourceSets.create("darwinMain")
-        val macosMain = sourceSets.create("macosMain")
-        val macosX64Main = sourceSets.getByName("macosX64Main")
-        val macosArm64Main = sourceSets.getByName("macosArm64Main")
-        val uikitMain = sourceSets.create("uikitMain")
-        val uikitX64Main = sourceSets.getByName("uikitX64Main")
-        val uikitArm64Main = sourceSets.getByName("uikitArm64Main")
-        val uikitSimArm64Main = sourceSets.getByName("uikitSimArm64Main")
+        val darwinMain = sourceSets.maybeCreate("darwinMain")
+        val macosMain = sourceSets.maybeCreate("macosMain")
+        val macosX64Main = sourceSets.maybeCreate("macosX64Main")
+        val macosArm64Main = sourceSets.maybeCreate("macosArm64Main")
+        val uikitMain = sourceSets.maybeCreate("uikitMain")
+        val uikitX64Main = sourceSets.maybeCreate("uikitX64Main")
+        val uikitArm64Main = sourceSets.maybeCreate("uikitArm64Main")
+        val uikitSimArm64Main = sourceSets.maybeCreate("uikitSimArm64Main")
         darwinMain.dependsOn(nativeMain)
         macosMain.dependsOn(darwinMain)
         macosX64Main.dependsOn(macosMain)
@@ -232,14 +235,14 @@ open class AndroidXComposeMultiplatformExtensionImpl @Inject constructor(
         uikitSimArm64Main.dependsOn(uikitMain)
 
         val nativeTest = getOrCreateNativeTest()
-        val darwinTest = sourceSets.create("darwinTest")
-        val macosTest = sourceSets.create("macosTest")
-        val macosX64Test = sourceSets.getByName("macosX64Test")
-        val macosArm64Test = sourceSets.getByName("macosArm64Test")
-        val uikitTest = sourceSets.create("uikitTest")
-        val uikitX64Test = sourceSets.getByName("uikitX64Test")
-        val uikitArm64Test = sourceSets.getByName("uikitArm64Test")
-        val uikitSimArm64Test = sourceSets.getByName("uikitSimArm64Test")
+        val darwinTest = sourceSets.maybeCreate("darwinTest")
+        val macosTest = sourceSets.maybeCreate("macosTest")
+        val macosX64Test = sourceSets.maybeCreate("macosX64Test")
+        val macosArm64Test = sourceSets.maybeCreate("macosArm64Test")
+        val uikitTest = sourceSets.maybeCreate("uikitTest")
+        val uikitX64Test = sourceSets.maybeCreate("uikitX64Test")
+        val uikitArm64Test = sourceSets.maybeCreate("uikitArm64Test")
+        val uikitSimArm64Test = sourceSets.maybeCreate("uikitSimArm64Test")
         darwinTest.dependsOn(nativeTest)
         macosTest.dependsOn(darwinTest)
         macosX64Test.dependsOn(macosTest)
@@ -303,6 +306,9 @@ open class AndroidXComposeMultiplatformExtensionImpl @Inject constructor(
     }
 
     override fun configureDarwinFlags() {
+        val platforms = ComposeProperties(project).targetPlatforms
+        if (platforms.none { it in ComposePlatforms.DARWIN }) return
+
         val darwinFlags = listOf(
             "-linker-option", "-framework", "-linker-option", "Metal",
             "-linker-option", "-framework", "-linker-option", "CoreText",
@@ -344,6 +350,9 @@ open class AndroidXComposeMultiplatformExtensionImpl @Inject constructor(
     }
 
     override fun iosInstrumentedTest() {
+        val platforms = ComposeProperties(project).targetPlatforms
+        if (platforms.none { it in ComposePlatforms.DARWIN }) return
+
         multiplatformExtension.run {
             val uikitInstrumentedTest = sourceSets.create("uikitInstrumentedTest")
 

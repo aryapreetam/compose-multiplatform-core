@@ -25,5 +25,3 @@ internal interface SystemThemeObserver {
 
     fun dispose()
 }
-
-internal expect fun getSystemThemeObserver(): SystemThemeObserver

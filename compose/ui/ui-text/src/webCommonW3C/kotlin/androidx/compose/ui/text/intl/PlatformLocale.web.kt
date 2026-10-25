@@ -48,7 +48,7 @@ private val rtlLanguagesSet = setOf("ar", "fa", "he", "iw", "ji", "ur", "yi")
 
 // Implemented according to ComponentOrientation.getOrientation (AWT),
 // since there is no js API for this.
-internal actual fun PlatformLocale.isRtl(): Boolean = this.language in rtlLanguagesSet
+internal fun PlatformLocale.isRtl(): Boolean = this.language in rtlLanguagesSet
 
 // K/JS and K/Wasm stdlib doesn't have this type. Therefore, we declare it here.
 // Ideally it would not be necessary, or at least we would make it internal, but Compose common API

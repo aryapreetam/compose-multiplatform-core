@@ -16,4 +16,4 @@
 
 package androidx.compose.ui.internal
 
-internal actual fun getCurrentThreadId(): Long = 0
+internal fun getCurrentThreadId(): Long = 0

@@ -32,6 +32,3 @@ internal actual fun InspectorInfo.tryPopulateReflectively(
     element: ModifierNodeElement<*>
 ) {
 }
-
-internal actual val PostDelayedDispatcher: CoroutineContext
-    get() = Dispatchers.Main

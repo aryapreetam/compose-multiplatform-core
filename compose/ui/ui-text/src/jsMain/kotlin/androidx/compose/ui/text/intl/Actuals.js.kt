@@ -16,7 +16,7 @@
 
 package androidx.compose.ui.text.intl
 
-internal actual fun userPreferredLanguages(): List<String> {
+internal fun userPreferredLanguages(): List<String> {
     return getUserPreferredLanguagesAsArray().toList()
 }
 

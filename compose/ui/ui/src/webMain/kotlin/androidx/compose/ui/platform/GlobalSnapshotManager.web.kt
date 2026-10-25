@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Android Open Source Project
+ * Copyright 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,32 @@
 
 package androidx.compose.ui.platform
 
-import kotlinx.coroutines.CoroutineDispatcher
+import androidx.compose.runtime.snapshots.Snapshot
+import kotlinx.atomicfu.atomic
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.launch
 
-internal actual val GlobalSnapshotManagerDispatcher: CoroutineDispatcher = Dispatchers.Main
+internal object GlobalSnapshotManager {
+    private val started = atomic(0)
+    private val sent = atomic(0)
+
+    fun ensureStarted() {
+        if (started.compareAndSet(0, 1)) {
+            val channel = Channel<Unit>(1)
+            CoroutineScope(Dispatchers.Main).launch {
+                channel.consumeEach {
+                    sent.compareAndSet(1, 0)
+                    Snapshot.sendApplyNotifications()
+                }
+            }
+            Snapshot.registerGlobalWriteObserver {
+                if (sent.compareAndSet(0, 1)) {
+                    channel.trySend(Unit)
+                }
+            }
+        }
+    }
+}

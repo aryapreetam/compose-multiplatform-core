@@ -72,5 +72,5 @@ internal class SystemThemeObserverImpl(window : Window) : SystemThemeObserver {
     }
 }
 
-internal actual fun getSystemThemeObserver(): SystemThemeObserver =
+internal fun getSystemThemeObserver(): SystemThemeObserver =
     SystemThemeObserverImpl(window)

@@ -172,9 +172,11 @@ internal class InnerNodeCoordinator(layoutNode: LayoutNode) : NodeCoordinator(la
 
     override fun performDraw(canvas: Canvas, graphicsLayer: GraphicsLayer?) {
         val owner = layoutNode.requireOwner()
-        layoutNode.zSortedChildren.forEach { child ->
-            if (child.isPlaced) {
-                child.draw(canvas, graphicsLayer)
+        if (canvas.drawsChildren) {
+            layoutNode.zSortedChildren.forEach { child ->
+                if (child.isPlaced) {
+                    child.draw(canvas, graphicsLayer)
+                }
             }
         }
         if (owner.showLayoutBounds) {

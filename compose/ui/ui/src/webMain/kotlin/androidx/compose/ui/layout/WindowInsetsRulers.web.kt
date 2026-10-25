@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 The Android Open Source Project
+ * Copyright 2025 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-package androidx.compose.ui.text
+package androidx.compose.ui.layout
 
-// TODO Use WeakMap once available https://youtrack.jetbrains.com/issue/KT-44309
-internal actual typealias WeakKeysCache<K, V> = NoCache<K, V>
+internal actual fun findDisplayCutouts(placementScope: Placeable.PlacementScope): List<RectRulers> = emptyList()
 
-internal class NoCache<K : Any, V> : Cache<K, V> {
-    override fun get(key: K, loader: (K) -> V): V = loader(key)
-}
+internal actual fun findInsetsAnimationProperties(
+    placementScope: Placeable.PlacementScope,
+    windowInsetsRulers: WindowInsetsRulers
+): WindowInsetsAnimation = NoWindowInsetsAnimation

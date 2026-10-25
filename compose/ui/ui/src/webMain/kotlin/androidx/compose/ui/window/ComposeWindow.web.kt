@@ -18,19 +18,12 @@ package androidx.compose.ui.window
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.platform.DomComposeOwner
+import kotlinx.browser.document
+import org.w3c.dom.DocumentReadyState
+import org.w3c.dom.HTMLElement
+import org.w3c.dom.LOADING
 
-/**
- * EXPERIMENTAL! Might be deleted or changed in the future!
- *
- * Creates the composition in HTML canvas created in parent container identified by [viewportContainerId] id.
- * This size of canvas is adjusted with the size of the container
- *
- * @param viewportContainerId - The id of an HTML element which would host the Compose Viewport.
- * If it's null, then `<body>` will be used as a container.
- * @param configure - A lambda for Compose Viewport configuration.
- * See [ComposeViewportConfiguration] for available options.
- * @param content - The Composable content to be rendered on the `<canvas>` element.
- */
 @ExperimentalComposeUiApi
 fun ComposeViewport(
     viewportContainerId: String? = null,
@@ -44,14 +37,42 @@ fun ComposeViewport(
     )
 }
 
-internal expect fun InternalComposeViewport(
+@ExperimentalComposeUiApi
+fun ComposeViewport(
+    viewportContainer: HTMLElement,
+    configure: ComposeViewportConfiguration.() -> Unit = {},
+    content: @Composable () -> Unit = { }
+) {
+    val owner = DomComposeOwner(viewportContainer)
+    owner.setContent(content)
+}
+
+internal fun InternalComposeViewport(
     viewportContainerId: String? = null,
     configure: ComposeViewportConfiguration.() -> Unit = {},
     content: @Composable () -> Unit = { }
-)
+) {
+    onDomReady {
+        val container = if (viewportContainerId != null) {
+            document.getElementById(viewportContainerId) as? HTMLElement
+                ?: error("failed to find element by viewportContainerId: '$viewportContainerId'")
+        } else {
+            document.body ?: error("failed to find <body> element")
+        }
+        ComposeViewport(container, configure, content)
+    }
+}
 
-// In K/JS target, an application can't start right away. We should wait until skiko.wasm is ready.
-// We'll do it implicitly, rather than asking the app developers to call it.
-internal expect fun onSkikoReady(block: () -> Unit)
+internal fun onSkikoReady(block: () -> Unit) {
+    onDomReady(block)
+}
 
-internal expect fun onDomReady(block: () -> Unit)
+internal fun onDomReady(block: () -> Unit) {
+    if (document.readyState == DocumentReadyState.Companion.LOADING) {
+        document.addEventListener("DOMContentLoaded", {
+            block()
+        })
+    } else {
+        block()
+    }
+}

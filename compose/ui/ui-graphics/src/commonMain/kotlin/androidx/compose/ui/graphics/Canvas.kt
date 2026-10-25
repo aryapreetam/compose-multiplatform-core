@@ -153,6 +153,17 @@ expect val Canvas.nativeCanvas: NativeCanvas
 interface Canvas {
 
     /**
+     * Indicates whether this canvas expects children of a LayoutNode to be drawn recursively
+     * during the node's draw pass.
+     *
+     * Raster-backed canvases (Skia, Android) return `true` because all children must be rasterized
+     * into a single shared surface.
+     * DOM-backed canvases return `false` because each LayoutNode maps to an independent DOM element
+     * and children are synchronized into their own DOM elements.
+     */
+    val drawsChildren: Boolean get() = true
+
+    /**
      * Saves a copy of the current transform and clip on the save stack.
      *
      * Call [restore] to pop the save stack.

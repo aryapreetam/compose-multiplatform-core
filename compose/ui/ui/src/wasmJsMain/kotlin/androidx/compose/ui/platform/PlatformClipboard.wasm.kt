@@ -94,7 +94,7 @@ class WasmPlatformClipboard : Clipboard {
 
 private val wasmPlatformClipboard: WasmPlatformClipboard by lazy { WasmPlatformClipboard() }
 
-internal actual fun createPlatformClipboard(): Clipboard = wasmPlatformClipboard
+internal fun createPlatformClipboard(): Clipboard = wasmPlatformClipboard
 
 actual class ClipEntry
 @ExperimentalComposeUiApi
