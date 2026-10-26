@@ -78,6 +78,7 @@ import androidx.compose.ui.modifier.ModifierLocalManager
 import androidx.compose.ui.node.LayoutNode
 import androidx.compose.ui.node.LayoutNodeDrawScope
 import androidx.compose.ui.node.MeasureAndLayoutDelegate
+import androidx.compose.ui.node.Nodes
 import androidx.compose.ui.node.OwnedLayer
 import androidx.compose.ui.node.Owner
 import androidx.compose.ui.node.OwnerSnapshotObserver
@@ -85,6 +86,7 @@ import androidx.compose.ui.node.RootForTest
 import androidx.compose.ui.semantics.EmptySemanticsModifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsOwner
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -119,12 +121,16 @@ import androidx.compose.ui.SessionMutex
 import androidx.compose.runtime.snapshots.Snapshot
 import org.w3c.dom.HTMLElement
 import org.w3c.dom.events.MouseEvent
+import org.w3c.dom.events.KeyboardEvent
+import androidx.compose.ui.input.key.toComposeEvent
 
 @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class)
 internal class DomComposeOwner(
     val rootContainer: HTMLElement,
-    override val density: Density = Density(1f)
+    override val density: Density = Density(1f),
+    val isPopup: Boolean = false
 ) : Owner {
+    var onPopupLayoutChange: ((width: Int, height: Int) -> Unit)? = null
     override val root: LayoutNode = LayoutNode().apply { measurePolicy = RootMeasurePolicy }
     private val _layoutNodes: MutableIntObjectMap<LayoutNode> = mutableIntObjectMapOf()
     override val layoutNodes: IntObjectMap<LayoutNode> get() = _layoutNodes
@@ -279,14 +285,41 @@ internal class DomComposeOwner(
         snapshotObserver.startObserving()
         root.attach(this)
         _layoutNodes[root.semanticsId] = root
-        rootContainer.style.position = "relative"
-        rootContainer.style.setProperty("overflow", "hidden")
+        if (!isPopup) {
+            rootContainer.style.position = "relative"
+            rootContainer.style.setProperty("overflow", "hidden")
+        }
 
         window.addEventListener("resize", {
             requestLayoutPass()
         })
 
         setupPointerEvents()
+        setupKeyboardEvents()
+    }
+
+    private fun setupKeyboardEvents() {
+        val onKey: (org.w3c.dom.events.Event) -> Unit = { e ->
+            val ke = e as? KeyboardEvent
+            if (ke != null) {
+                val activeTag = document.activeElement?.tagName?.lowercase()
+                if (activeTag != "input" && activeTag != "textarea") {
+                    try {
+                        val composeEvent = ke.toComposeEvent()
+                        val consumed = focusOwner.dispatchKeyEvent(composeEvent)
+                        if (consumed) {
+                            ke.preventDefault()
+                        }
+                        Snapshot.sendApplyNotifications()
+                        requestLayoutPass()
+                    } catch (t: Throwable) {
+                        // Prevent unattached virtual key nodes from interrupting the runtime
+                    }
+                }
+            }
+        }
+        window.addEventListener("keydown", onKey)
+        window.addEventListener("keyup", onKey)
     }
 
     private fun setupPointerEvents() {
@@ -313,9 +346,26 @@ internal class DomComposeOwner(
                 button = e.composeButton
             )
             pointerInputEventProcessor.process(pointerInputEvent, IdentityPositionCalculator)
+            Snapshot.sendApplyNotifications()
+            requestLayoutPass()
         }
 
-        rootContainer.addEventListener("pointerdown", { e -> sendPointer(e as MouseEvent, PointerEventType.Press) })
+        rootContainer.addEventListener("pointerdown", { e ->
+            val me = e as? MouseEvent
+            if (me != null) {
+                var target = me.target as? HTMLElement
+                while (target != null && target != rootContainer) {
+                    if (target.tagName.equals("button", ignoreCase = true) ||
+                        target.getAttribute("role") == "button"
+                    ) {
+                        DomPointerBridge.attachRipple(target, me.clientX.toDouble(), me.clientY.toDouble())
+                        break
+                    }
+                    target = target.parentElement as? HTMLElement
+                }
+            }
+            sendPointer(e as MouseEvent, PointerEventType.Press)
+        })
         rootContainer.addEventListener("pointermove", { e -> sendPointer(e as MouseEvent, PointerEventType.Move) })
         rootContainer.addEventListener("pointerup", { e -> sendPointer(e as MouseEvent, PointerEventType.Release) })
     }
@@ -332,6 +382,7 @@ internal class DomComposeOwner(
                 content = {
                     CompositionLocalProvider(
                         androidx.compose.ui.window.LocalActiveClipEventsTarget provides { null },
+                        androidx.compose.ui.window.LocalDomRootContainer provides rootContainer,
                         LocalSystemTheme provides SystemTheme.Light,
                         content = content
                     )
@@ -354,14 +405,23 @@ internal class DomComposeOwner(
         val rootNode = root
         if (!rootNode.isAttached) return
 
-        val w = if (rootContainer.clientWidth > 0) rootContainer.clientWidth else window.innerWidth
-        val h = if (rootContainer.clientHeight > 0) rootContainer.clientHeight else window.innerHeight
+        val w = if (rootContainer.clientWidth > 0 && !isPopup) rootContainer.clientWidth else window.innerWidth
+        val h = if (rootContainer.clientHeight > 0 && !isPopup) rootContainer.clientHeight else window.innerHeight
 
         if (w > 0 && h > 0) {
-            measureAndLayoutDelegate.updateRootConstraints(Constraints.fixed(w, h))
+            val constraints = if (isPopup) {
+                Constraints(minWidth = 0, maxWidth = w, minHeight = 0, maxHeight = h)
+            } else {
+                Constraints.fixed(w, h)
+            }
+            measureAndLayoutDelegate.updateRootConstraints(constraints)
         }
         measureAndLayoutDelegate.measureAndLayout()
         syncNodeTreeToDom(rootNode)
+
+        if (isPopup) {
+            onPopupLayoutChange?.invoke(rootNode.width, rootNode.height)
+        }
     }
 
     override fun measureAndLayout(layoutNode: LayoutNode, constraints: Constraints) {
@@ -377,8 +437,15 @@ internal class DomComposeOwner(
         if (!node.isAttached || !node.isPlaced) return
 
         val config = node.semanticsConfiguration
-        val isButton = config?.getOrNull(SemanticsProperties.Role) == Role.Button
-        val isClickable = config?.contains(SemanticsActions.OnClick) == true
+        val semanticsNode = if (node.nodes.has(Nodes.Semantics)) {
+            SemanticsNode(node, mergingEnabled = true)
+        } else null
+        val mergedConfig = semanticsNode?.config ?: config
+
+        val role = mergedConfig?.getOrNull(SemanticsProperties.Role) ?: config?.getOrNull(SemanticsProperties.Role)
+        val isButton = role == Role.Button
+        val isCheckbox = role == Role.Checkbox
+        val isClickable = isCheckbox || mergedConfig?.contains(SemanticsActions.OnClick) == true || config?.contains(SemanticsActions.OnClick) == true
         val isInput = config?.contains(SemanticsProperties.EditableText) == true ||
             config?.contains(SemanticsActions.SetText) == true
 
@@ -401,6 +468,7 @@ internal class DomComposeOwner(
                 el.style.padding = "0px"
                 el.style.font = "inherit"
                 el.style.color = "inherit"
+                el.style.zIndex = "1"
                 el.style.setProperty("pointer-events", "auto")
                 DomPointerBridge.bindNodeInput(el as HTMLInputElement) { newText ->
                     activeInputMethodRequest?.onEditCommand?.invoke(
@@ -420,8 +488,13 @@ internal class DomComposeOwner(
                     requestLayoutPass()
                 }
                 (el as HTMLInputElement).onfocus = {
-                    node.semanticsConfiguration?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
-                    node.semanticsConfiguration?.getOrNull(SemanticsActions.RequestFocus)?.action?.invoke()
+                    val clickAction = node.semanticsConfiguration?.getOrNull(SemanticsActions.OnClick)?.action
+                        ?: mergedConfig?.getOrNull(SemanticsActions.OnClick)?.action
+                    clickAction?.invoke()
+
+                    val focusAction = node.semanticsConfiguration?.getOrNull(SemanticsActions.RequestFocus)?.action
+                        ?: mergedConfig?.getOrNull(SemanticsActions.RequestFocus)?.action
+                    focusAction?.invoke()
                     requestLayoutPass()
                 }
             } else if (isButton) {
@@ -431,75 +504,176 @@ internal class DomComposeOwner(
                 el.style.background = "transparent"
                 el.style.padding = "0px"
                 el.style.cursor = "pointer"
+                el.style.setProperty("overflow", "hidden")
                 el.style.setProperty("pointer-events", "auto")
                 DomPointerBridge.bindNodeClick(el) {
                     node.semanticsConfiguration?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
+                        ?: mergedConfig?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
                     requestLayoutPass()
                 }
             } else if (isClickable) {
                 el.style.cursor = "pointer"
                 el.style.setProperty("pointer-events", "auto")
+                if (isCheckbox) {
+                    el.setAttribute("role", "checkbox")
+                    el.style.border = "none"
+                    el.style.background = "transparent"
+                }
                 DomPointerBridge.bindNodeClick(el) {
                     node.semanticsConfiguration?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
+                        ?: mergedConfig?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
+                    (el.querySelector("input") as? HTMLInputElement)?.focus()
                     requestLayoutPass()
                 }
             } else {
                 el.style.setProperty("pointer-events", "none")
             }
-            rootContainer.appendChild(el)
             el
         }
 
+        // Hierarchical scene-graph mounting: mount to parent LayoutNode DOM element
+        var p = node.parent
+        var parentEl: HTMLElement? = null
+        while (p != null) {
+            val candidate = nodeDomMap[p]
+            if (candidate != null && candidate != rootContainer) {
+                parentEl = candidate
+                break
+            }
+            p = p.parent
+        }
+        val targetContainer = if (isPopup) rootContainer else (parentEl ?: rootContainer)
+        if (element.parentElement != targetContainer) {
+            targetContainer.appendChild(element)
+        }
+
+        if (isCheckbox) {
+            element.setAttribute("role", "checkbox")
+            val toggleState = mergedConfig?.getOrNull(SemanticsProperties.ToggleableState)
+                ?: config?.getOrNull(SemanticsProperties.ToggleableState)
+            val isChecked = toggleState == androidx.compose.ui.state.ToggleableState.On
+            element.setAttribute("aria-checked", isChecked.toString())
+            element.setAttribute("data-luta-checked", isChecked.toString())
+            element.style.border = "none"
+            element.style.outline = "none"
+            element.style.background = "transparent"
+        }
+
         if (isInput && element is HTMLInputElement) {
-            val currentText = config?.getOrNull(SemanticsProperties.EditableText)?.text ?: ""
-            if (element.value != currentText && document.activeElement != element) {
+            val currentText = findEditableText(node)
+            if (currentText != null && element.value != currentText && document.activeElement != element) {
                 element.value = currentText
             }
         }
 
         val pos = node.outerCoordinator.positionInRoot()
-        val width = node.width
-        val height = node.height
+        val basePos = if (targetContainer == rootContainer || p == null) {
+            Offset.Zero
+        } else {
+            p.outerCoordinator.positionInRoot()
+        }
+        val localX = pos.x - basePos.x
+        val localY = pos.y - basePos.y
 
-        element.style.transform = "translate3d(${pos.x}px, ${pos.y}px, 0px)"
-        element.style.width = "${width}px"
-        element.style.height = "${height}px"
+        element.style.transform = "translate3d(${localX}px, ${localY}px, 0px)"
+        element.style.width = "${node.width}px"
+        element.style.height = "${node.height}px"
 
         val innerPos = node.innerCoordinator.positionInRoot() - pos
         val padLeft = innerPos.x.coerceAtLeast(0f)
         val padTop = innerPos.y.coerceAtLeast(0f)
         if (isInput && element is HTMLInputElement) {
-            element.style.padding = "${padTop}px ${padLeft}px ${padTop}px ${padLeft}px"
-        } else if (padLeft > 0f || padTop > 0f) {
-            element.style.paddingLeft = "${padLeft}px"
-            element.style.paddingTop = "${padTop}px"
+            val hPad = if (padLeft > 0f) padLeft else 16f
+            val vPad = if (padTop > 0f) padTop else 8f
+            element.style.padding = "${vPad}px ${hPad}px ${vPad}px ${hPad}px"
+        } else {
+            element.style.padding = "0px"
+        }
+
+        // Clear previous frame SVG decorations so exited state layers (hover, focus) don't ghost
+        val existingSvg = element.querySelector(":scope > svg[data-luta-svg]")
+        if (existingSvg != null) {
+            existingSvg.innerHTML = ""
         }
 
         // Execute drawing operations into the node's element
         try {
             val domCanvas = DomCanvas(element)
+            val outerPos = node.outerCoordinator.position
+            domCanvas.translate(-outerPos.x.toFloat(), -outerPos.y.toFloat())
             node.draw(domCanvas, null)
         } catch (t: Throwable) {
             // Draw will catch up once layout pass finalizes
         }
 
-        // Recurse children (skip internal text-rendering children for native <input>)
-        if (isInput) return
+        if (isCheckbox) {
+            element.style.border = "none"
+            element.style.outline = "none"
+            element.style.background = "transparent"
+            element.style.setProperty("overflow", "visible")
+        } else if (element.style.borderRadius.isNotEmpty()) {
+            element.style.setProperty("overflow", "hidden")
+        }
 
+        // Leaf input invariant: native input handles its own text/editing; do not instantiate duplicate children
+        if (isInput) {
+            return
+        }
+
+        // Recurse children
         node.children.forEach { child ->
             syncNodeTreeToDom(child)
         }
     }
 
+    private fun findEditableText(startNode: LayoutNode): String? {
+        var curr: LayoutNode? = startNode
+        while (curr != null) {
+            val config = if (curr.nodes.has(Nodes.Semantics)) {
+                SemanticsNode(curr, mergingEnabled = true).config
+            } else {
+                curr.semanticsConfiguration
+            }
+            val text = config?.getOrNull(SemanticsProperties.EditableText)?.text
+            if (text != null) return text
+            curr = curr.parent
+        }
+        fun searchChildren(n: LayoutNode): String? {
+            for (child in n.children) {
+                val config = if (child.nodes.has(Nodes.Semantics)) {
+                    SemanticsNode(child, mergingEnabled = true).config
+                } else {
+                    child.semanticsConfiguration
+                }
+                val text = config?.getOrNull(SemanticsProperties.EditableText)?.text
+                if (text != null) return text
+                val found = searchChildren(child)
+                if (found != null) return found
+            }
+            return null
+        }
+        return searchChildren(startNode)
+    }
+
     private fun findSetTextAction(startNode: LayoutNode): ((AnnotatedString) -> Boolean)? {
         var curr: LayoutNode? = startNode
         while (curr != null) {
-            curr.semanticsConfiguration?.getOrNull(SemanticsActions.SetText)?.action?.let { return it }
+            val config = if (curr.nodes.has(Nodes.Semantics)) {
+                SemanticsNode(curr, mergingEnabled = true).config
+            } else {
+                curr.semanticsConfiguration
+            }
+            config?.getOrNull(SemanticsActions.SetText)?.action?.let { return it }
             curr = curr.parent
         }
         fun searchChildren(n: LayoutNode): ((AnnotatedString) -> Boolean)? {
             for (child in n.children) {
-                child.semanticsConfiguration?.getOrNull(SemanticsActions.SetText)?.action?.let { return it }
+                val config = if (child.nodes.has(Nodes.Semantics)) {
+                    SemanticsNode(child, mergingEnabled = true).config
+                } else {
+                    child.semanticsConfiguration
+                }
+                config?.getOrNull(SemanticsActions.SetText)?.action?.let { return it }
                 val found = searchChildren(child)
                 if (found != null) return found
             }
@@ -571,6 +745,7 @@ internal class DomComposeOwner(
     ): OwnedLayer {
         val transform = Matrix()
         val inverseTransform = Matrix()
+        var currentElevation: Float = explicitLayer?.shadowElevation ?: 0f
         return object : OwnedLayer {
             override fun updateLayerProperties(scope: ReusableGraphicsLayerScope) {
                 transform.reset()
@@ -578,16 +753,28 @@ internal class DomComposeOwner(
                 transform.rotateZ(scope.rotationZ)
                 transform.translate(scope.translationX, scope.translationY)
                 transform.invertTo(inverseTransform)
+                currentElevation = if (scope.shadowElevation > 0f) scope.shadowElevation else (explicitLayer?.shadowElevation ?: 0f)
             }
             override fun isInLayer(position: Offset): Boolean = true
             override fun move(position: IntOffset) {}
             override fun resize(size: IntSize) {}
             override fun drawLayer(canvas: Canvas, parentLayer: GraphicsLayer?) {
+                val domCanvas = canvas as? DomCanvas
+                val host = domCanvas?.hostElement
+                if (host != null && currentElevation > 0f) {
+                    val dp = if (density.density > 0f) currentElevation / density.density else currentElevation
+                    val y1 = (dp * 0.5f).toInt().coerceAtLeast(1)
+                    val blur1 = (dp * 1.5f).toInt().coerceAtLeast(2)
+                    val y2 = (dp * 0.8f).toInt().coerceAtLeast(1)
+                    val blur2 = (dp * 2.5f).toInt().coerceAtLeast(3)
+                    host.style.boxShadow = "0px ${y1}px ${blur1}px rgba(0, 0, 0, 0.2), 0px ${y2}px ${blur2}px rgba(0, 0, 0, 0.14)"
+                }
                 drawBlock(canvas, parentLayer)
             }
             override fun updateDisplayList() {}
             override fun invalidate() {
                 invalidateParentLayer()
+                requestLayoutPass()
             }
             override fun destroy() {}
             override fun mapOffset(point: Offset, inverse: Boolean): Offset = point
@@ -658,9 +845,17 @@ internal class DomComposeOwner(
 
     override fun screenToLocal(positionOnScreen: Offset): Offset = positionOnScreen
     override fun localToScreen(localPosition: Offset): Offset = localPosition
+
+    fun dispose() {
+        snapshotObserver.stopObserving()
+        coroutineJob.cancel()
+        nodeDomMap.values.forEach { it.remove() }
+        nodeDomMap.clear()
+        _layoutNodes.clear()
+    }
 }
 
-private object DomFrameClock : MonotonicFrameClock {
+internal object DomFrameClock : MonotonicFrameClock {
     override suspend fun <R> withFrameNanos(onFrame: (frameTimeNanos: Long) -> R): R =
         suspendCancellableCoroutine { continuation ->
             val id = window.requestAnimationFrame { time ->
@@ -674,7 +869,7 @@ private object DomFrameClock : MonotonicFrameClock {
         }
 }
 
-private object DomUriHandler : UriHandler {
+internal object DomUriHandler : UriHandler {
     override fun openUri(uri: String) {
         window.open(uri, "_blank")
     }

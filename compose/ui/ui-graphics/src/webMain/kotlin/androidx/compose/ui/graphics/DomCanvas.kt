@@ -39,31 +39,67 @@ class DomCanvas(
     override val drawsChildren: Boolean get() = false
     val nativeCanvas = NativeCanvas(hostElement)
 
-    override fun save() {}
-    override fun restore() {}
-    override fun saveLayer(bounds: Rect, paint: Paint) {}
-    override fun translate(dx: Float, dy: Float) {}
+    private var currentTx = 0f
+    private var currentTy = 0f
+    private val transformStack = mutableListOf<Offset>()
+
+    override fun save() {
+        transformStack.add(Offset(currentTx, currentTy))
+    }
+
+    override fun restore() {
+        if (transformStack.isNotEmpty()) {
+            val prev = transformStack.removeAt(transformStack.lastIndex)
+            currentTx = prev.x
+            currentTy = prev.y
+        } else {
+            currentTx = 0f
+            currentTy = 0f
+        }
+    }
+
+    override fun saveLayer(bounds: Rect, paint: Paint) {
+        save()
+    }
+
+    override fun translate(dx: Float, dy: Float) {
+        currentTx += dx
+        currentTy += dy
+    }
+
     override fun scale(sx: Float, sy: Float) {}
     override fun rotate(degrees: Float) {}
     override fun skew(sx: Float, sy: Float) {}
     override fun concat(matrix: Matrix) {}
 
     override fun clipRect(left: Float, top: Float, right: Float, bottom: Float, clipOp: ClipOp) {
-        hostElement?.style?.setProperty("overflow", "hidden")
+        val host = hostElement ?: return
+        if (clipOp == ClipOp.Difference) {
+            val b = if (bottom > 0f) bottom else 16f
+            val poly = "polygon(0 0, ${left}px 0, ${left}px ${b}px, ${right}px ${b}px, ${right}px 0, 100% 0, 100% 100%, 0 100%)"
+            host.style.setProperty("clip-path", poly)
+        } else {
+            host.style.setProperty("overflow", "hidden")
+        }
     }
 
     override fun clipPath(path: Path, clipOp: ClipOp) {
-        hostElement?.style?.setProperty("overflow", "hidden")
+        val host = hostElement ?: return
+        host.style.setProperty("overflow", "hidden")
+        val d = (path as? DomPath)?.toSvgPathData()
+        if (!d.isNullOrEmpty()) {
+            host.style.setProperty("clip-path", "path('$d')")
+        }
     }
 
     override fun drawLine(p1: Offset, p2: Offset, paint: Paint) {
         val host = hostElement ?: return
         val svg = getOrCreateSvg(host)
         val line = document.createElementNS("http://www.w3.org/2000/svg", "line")
-        line.setAttribute("x1", p1.x.toString())
-        line.setAttribute("y1", p1.y.toString())
-        line.setAttribute("x2", p2.x.toString())
-        line.setAttribute("y2", p2.y.toString())
+        line.setAttribute("x1", (p1.x + currentTx).toString())
+        line.setAttribute("y1", (p1.y + currentTy).toString())
+        line.setAttribute("x2", (p2.x + currentTx).toString())
+        line.setAttribute("y2", (p2.y + currentTy).toString())
         line.setAttribute("stroke", paint.color.toCssRgba())
         line.setAttribute("stroke-width", paint.strokeWidth.toString())
         svg.appendChild(line)
@@ -71,6 +107,44 @@ class DomCanvas(
 
     override fun drawRect(left: Float, top: Float, right: Float, bottom: Float, paint: Paint) {
         val host = hostElement ?: return
+        if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
+            return
+        }
+        val hostW = host.style.width.removeSuffix("px").toDoubleOrNull() ?: host.clientWidth.toDouble()
+        val hostH = host.style.height.removeSuffix("px").toDoubleOrNull() ?: host.clientHeight.toDouble()
+        val isButton = host.tagName.equals("button", ignoreCase = true) || host.getAttribute("role") == "button"
+        val isCheckbox = host.getAttribute("role") == "checkbox" || host.hasAttribute("data-luta-checked")
+        val maxInset = if (paint.style == PaintingStyle.Stroke && paint.strokeWidth > 0f) {
+            paint.strokeWidth + 0.5f
+        } else {
+            0.5f
+        }
+        val isFullElement = isButton || (!isCheckbox && currentTx == 0f && currentTy == 0f && left <= maxInset && top <= maxInset && (hostW <= 0.0 || right >= (hostW - maxInset - 1.5).toFloat()) && (hostH <= 0.0 || bottom >= (hostH - maxInset - 1.5).toFloat()))
+        if (!isFullElement) {
+            val svg = getOrCreateSvg(host)
+            val rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
+            val x = left + currentTx
+            val y = top + currentTy
+            val w = right - left
+            val h = bottom - top
+            rect.setAttribute("x", x.toString())
+            rect.setAttribute("y", y.toString())
+            rect.setAttribute("width", w.toString())
+            rect.setAttribute("height", h.toString())
+            if (paint.color != Color.Unspecified) {
+                if (paint.style == PaintingStyle.Stroke) {
+                    rect.setAttribute("fill", "none")
+                    rect.setAttribute("stroke", paint.color.toCssRgba())
+                    val sw = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
+                    rect.setAttribute("stroke-width", sw.toString())
+                } else {
+                    rect.setAttribute("fill", paint.color.toCssRgba())
+                    rect.setAttribute("stroke", "none")
+                }
+            }
+            svg.appendChild(rect)
+            return
+        }
         if (paint.color != Color.Unspecified) {
             if (paint.style == PaintingStyle.Stroke) {
                 val strokeW = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
@@ -91,6 +165,46 @@ class DomCanvas(
         paint: Paint,
     ) {
         val host = hostElement ?: return
+        if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
+            return
+        }
+        val hostW = host.style.width.removeSuffix("px").toDoubleOrNull() ?: host.clientWidth.toDouble()
+        val hostH = host.style.height.removeSuffix("px").toDoubleOrNull() ?: host.clientHeight.toDouble()
+        val isButton = host.tagName.equals("button", ignoreCase = true) || host.getAttribute("role") == "button"
+        val isCheckbox = host.getAttribute("role") == "checkbox" || host.hasAttribute("data-luta-checked")
+        val maxInset = if (paint.style == PaintingStyle.Stroke && paint.strokeWidth > 0f) {
+            paint.strokeWidth + 0.5f
+        } else {
+            0.5f
+        }
+        val isFullElement = isButton || (!isCheckbox && currentTx == 0f && currentTy == 0f && left <= maxInset && top <= maxInset && (hostW <= 0.0 || right >= (hostW - maxInset - 1.5).toFloat()) && (hostH <= 0.0 || bottom >= (hostH - maxInset - 1.5).toFloat()))
+        if (!isFullElement) {
+            val svg = getOrCreateSvg(host)
+            val rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
+            val x = left + currentTx
+            val y = top + currentTy
+            val w = right - left
+            val h = bottom - top
+            rect.setAttribute("x", x.toString())
+            rect.setAttribute("y", y.toString())
+            rect.setAttribute("width", w.toString())
+            rect.setAttribute("height", h.toString())
+            rect.setAttribute("rx", radiusX.toString())
+            rect.setAttribute("ry", radiusY.toString())
+            if (paint.color != Color.Unspecified) {
+                if (paint.style == PaintingStyle.Stroke) {
+                    rect.setAttribute("fill", "none")
+                    rect.setAttribute("stroke", paint.color.toCssRgba())
+                    val sw = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
+                    rect.setAttribute("stroke-width", sw.toString())
+                } else {
+                    rect.setAttribute("fill", paint.color.toCssRgba())
+                    rect.setAttribute("stroke", "none")
+                }
+            }
+            svg.appendChild(rect)
+            return
+        }
         if (paint.color != Color.Unspecified) {
             if (paint.style == PaintingStyle.Stroke) {
                 val strokeW = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
@@ -100,21 +214,33 @@ class DomCanvas(
             }
         }
         host.style.borderRadius = "${radiusX}px"
+        host.style.setProperty("overflow", "hidden")
     }
 
     override fun drawOval(left: Float, top: Float, right: Float, bottom: Float, paint: Paint) {
         val host = hostElement ?: return
+        if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
+            return
+        }
         val svg = getOrCreateSvg(host)
         val ellipse = document.createElementNS("http://www.w3.org/2000/svg", "ellipse")
-        val cx = (left + right) / 2f
-        val cy = (top + bottom) / 2f
+        val cx = (left + right) / 2f + currentTx
+        val cy = (top + bottom) / 2f + currentTy
         val rx = (right - left) / 2f
         val ry = (bottom - top) / 2f
         ellipse.setAttribute("cx", cx.toString())
         ellipse.setAttribute("cy", cy.toString())
         ellipse.setAttribute("rx", rx.toString())
         ellipse.setAttribute("ry", ry.toString())
-        ellipse.setAttribute("fill", paint.color.toCssRgba())
+        if (paint.style == PaintingStyle.Stroke) {
+            ellipse.setAttribute("fill", "none")
+            ellipse.setAttribute("stroke", paint.color.toCssRgba())
+            val sw = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
+            ellipse.setAttribute("stroke-width", sw.toString())
+        } else {
+            ellipse.setAttribute("fill", paint.color.toCssRgba())
+            ellipse.setAttribute("stroke", "none")
+        }
         if (paint.alpha < 1f) {
             ellipse.setAttribute("opacity", paint.alpha.toString())
         }
@@ -123,12 +249,25 @@ class DomCanvas(
 
     override fun drawCircle(center: Offset, radius: Float, paint: Paint) {
         val host = hostElement ?: return
+        if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
+            return
+        }
         val svg = getOrCreateSvg(host)
         val circle = document.createElementNS("http://www.w3.org/2000/svg", "circle")
-        circle.setAttribute("cx", center.x.toString())
-        circle.setAttribute("cy", center.y.toString())
+        val cx = center.x + currentTx
+        val cy = center.y + currentTy
+        circle.setAttribute("cx", cx.toString())
+        circle.setAttribute("cy", cy.toString())
         circle.setAttribute("r", radius.toString())
-        circle.setAttribute("fill", paint.color.toCssRgba())
+        if (paint.style == PaintingStyle.Stroke) {
+            circle.setAttribute("fill", "none")
+            circle.setAttribute("stroke", paint.color.toCssRgba())
+            val sw = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
+            circle.setAttribute("stroke-width", sw.toString())
+        } else {
+            circle.setAttribute("fill", paint.color.toCssRgba())
+            circle.setAttribute("stroke", "none")
+        }
         if (paint.alpha < 1f) {
             circle.setAttribute("opacity", paint.alpha.toString())
         }
@@ -148,16 +287,36 @@ class DomCanvas(
 
     override fun drawPath(path: Path, paint: Paint) {
         val host = hostElement ?: return
+        if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
+            return
+        }
         val svg = getOrCreateSvg(host)
         val pathElement = document.createElementNS("http://www.w3.org/2000/svg", "path")
         val d = (path as? DomPath)?.toSvgPathData() ?: ""
         pathElement.setAttribute("d", d)
+        if (currentTx != 0f || currentTy != 0f) {
+            pathElement.setAttribute("transform", "translate($currentTx, $currentTy)")
+        }
         if (paint.style == PaintingStyle.Stroke) {
             pathElement.setAttribute("fill", "none")
             pathElement.setAttribute("stroke", paint.color.toCssRgba())
-            pathElement.setAttribute("stroke-width", paint.strokeWidth.toString())
+            val sw = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
+            pathElement.setAttribute("stroke-width", sw.toString())
+            val cap = when (paint.strokeCap) {
+                StrokeCap.Round -> "round"
+                StrokeCap.Square -> "square"
+                else -> "butt"
+            }
+            pathElement.setAttribute("stroke-linecap", cap)
+            val join = when (paint.strokeJoin) {
+                StrokeJoin.Round -> "round"
+                StrokeJoin.Bevel -> "bevel"
+                else -> "miter"
+            }
+            pathElement.setAttribute("stroke-linejoin", join)
         } else {
             pathElement.setAttribute("fill", paint.color.toCssRgba())
+            pathElement.setAttribute("stroke", "none")
         }
         svg.appendChild(pathElement)
     }
@@ -208,7 +367,6 @@ class DomCanvas(
     private fun getOrCreateSvg(host: HTMLElement): Element {
         val existing = host.querySelector(":scope > svg[data-luta-svg]")
         if (existing != null) {
-            existing.innerHTML = ""
             return existing
         }
         return (document.createElementNS("http://www.w3.org/2000/svg", "svg") as SVGElement).also {

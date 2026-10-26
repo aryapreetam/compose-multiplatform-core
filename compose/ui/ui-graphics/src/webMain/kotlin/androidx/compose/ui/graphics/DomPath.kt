@@ -24,9 +24,18 @@ import kotlin.math.min
 
 actual fun Path(): Path = DomPath()
 
+sealed interface DomPathOp {
+    data class MoveTo(val x: Float, val y: Float) : DomPathOp
+    data class LineTo(val x: Float, val y: Float) : DomPathOp
+    data class QuadTo(val x1: Float, val y1: Float, val x2: Float, val y2: Float) : DomPathOp
+    data class CubicTo(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val x3: Float, val y3: Float) : DomPathOp
+    object Close : DomPathOp
+}
+
 class DomPath : Path {
     override var fillType: PathFillType = PathFillType.NonZero
 
+    val operations = mutableListOf<DomPathOp>()
     private val svgCommands = StringBuilder()
     private var currentX = 0f
     private var currentY = 0f
@@ -50,6 +59,7 @@ class DomPath : Path {
     }
 
     override fun moveTo(x: Float, y: Float) {
+        operations.add(DomPathOp.MoveTo(x, y))
         svgCommands.append("M $x $y ")
         currentX = x
         currentY = y
@@ -61,6 +71,7 @@ class DomPath : Path {
     }
 
     override fun lineTo(x: Float, y: Float) {
+        operations.add(DomPathOp.LineTo(x, y))
         svgCommands.append("L $x $y ")
         currentX = x
         currentY = y
@@ -77,6 +88,7 @@ class DomPath : Path {
     }
 
     override fun quadraticTo(x1: Float, y1: Float, x2: Float, y2: Float) {
+        operations.add(DomPathOp.QuadTo(x1, y1, x2, y2))
         svgCommands.append("Q $x1 $y1, $x2 $y2 ")
         currentX = x2
         currentY = y2
@@ -94,6 +106,7 @@ class DomPath : Path {
     }
 
     override fun cubicTo(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float) {
+        operations.add(DomPathOp.CubicTo(x1, y1, x2, y2, x3, y3))
         svgCommands.append("C $x1 $y1, $x2 $y2, $x3 $y3 ")
         currentX = x3
         currentY = y3
@@ -184,10 +197,12 @@ class DomPath : Path {
     }
 
     override fun close() {
+        operations.add(DomPathOp.Close)
         svgCommands.append("Z ")
     }
 
     override fun reset() {
+        operations.clear()
         svgCommands.clear()
         currentX = 0f
         currentY = 0f

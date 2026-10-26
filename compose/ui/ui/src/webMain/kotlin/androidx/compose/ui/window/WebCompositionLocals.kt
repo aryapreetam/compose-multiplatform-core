@@ -24,3 +24,8 @@ import org.w3c.dom.HTMLElement
 val LocalActiveClipEventsTarget = staticCompositionLocalOf<() -> HTMLElement?> {
     { null }
 }
+
+@InternalComposeUiApi
+val LocalDomRootContainer = staticCompositionLocalOf<HTMLElement?> {
+    null
+}
