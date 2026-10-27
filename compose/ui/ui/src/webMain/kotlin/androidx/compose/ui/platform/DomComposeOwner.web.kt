@@ -27,6 +27,9 @@ import androidx.compose.runtime.Recomposer
 import androidx.compose.runtime.retain.ForgetfulRetainedValuesStore
 import androidx.compose.runtime.retain.RetainedValuesStore
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.SystemTheme
@@ -79,6 +82,7 @@ import androidx.compose.ui.node.LayoutNode
 import androidx.compose.ui.node.LayoutNodeDrawScope
 import androidx.compose.ui.node.MeasureAndLayoutDelegate
 import androidx.compose.ui.node.Nodes
+import androidx.compose.ui.node.NodeCoordinator
 import androidx.compose.ui.node.OwnedLayer
 import androidx.compose.ui.node.Owner
 import androidx.compose.ui.node.OwnerSnapshotObserver
@@ -273,6 +277,23 @@ internal class DomComposeOwner(
 
     // Maps each LayoutNode to its persistent DOM container
     private val nodeDomMap = mutableMapOf<LayoutNode, HTMLElement>()
+    private var currentDrawingElement: HTMLElement? = null
+    private var currentDrawingNode: LayoutNode? = null
+    private var currentDrawingNodeHasShadow: Boolean = false
+
+    private fun computeLayoutOffsetRelativeToParentOuter(node: LayoutNode): IntOffset {
+        val parent = node.parent ?: return node.outerCoordinator.position
+        val parentOuter = parent.outerCoordinator
+        var x = node.outerCoordinator.position.x
+        var y = node.outerCoordinator.position.y
+        var curr: NodeCoordinator? = node.outerCoordinator.wrappedBy
+        while (curr != null && curr !== parentOuter) {
+            x += curr.position.x
+            y += curr.position.y
+            curr = curr.wrappedBy
+        }
+        return IntOffset(x, y)
+    }
     private val measureAndLayoutDelegate = MeasureAndLayoutDelegate(root)
     private val pointerInputEventProcessor = PointerInputEventProcessor(root)
     private val endApplyChangesListeners = mutableListOf<() -> Unit>()
@@ -280,6 +301,8 @@ internal class DomComposeOwner(
     private val recomposer = Recomposer(coroutineContext)
     private val composition = Composition(DefaultUiApplier(root), recomposer)
     private var isLayoutPassScheduled = false
+    private var lastPointerUpTimestamp: Double = 0.0
+    private val onCommitAffectingDraw: (LayoutNode) -> Unit = { requestLayoutPass() }
 
     init {
         snapshotObserver.startObserving()
@@ -288,6 +311,8 @@ internal class DomComposeOwner(
         if (!isPopup) {
             rootContainer.style.position = "relative"
             rootContainer.style.setProperty("overflow", "hidden")
+            rootContainer.style.setProperty("user-select", "none")
+            rootContainer.style.setProperty("-webkit-user-select", "none")
         }
 
         window.addEventListener("resize", {
@@ -323,11 +348,13 @@ internal class DomComposeOwner(
     }
 
     private fun setupPointerEvents() {
+        var isPointerDown = false
+
         fun sendPointer(e: MouseEvent, eventType: PointerEventType) {
             val rect = rootContainer.getBoundingClientRect()
             val x = (e.clientX - rect.left).toFloat()
             val y = (e.clientY - rect.top).toFloat()
-            val isDown = eventType == PointerEventType.Press || (eventType == PointerEventType.Move && e.buttons.toInt() > 0)
+            val isDown = eventType == PointerEventType.Press || (eventType == PointerEventType.Move && (isPointerDown || e.buttons.toInt() > 0))
             val pointerData = PointerInputEventData(
                 id = PointerId(0),
                 uptime = window.performance.now().toLong(),
@@ -351,23 +378,20 @@ internal class DomComposeOwner(
         }
 
         rootContainer.addEventListener("pointerdown", { e ->
-            val me = e as? MouseEvent
-            if (me != null) {
-                var target = me.target as? HTMLElement
-                while (target != null && target != rootContainer) {
-                    if (target.tagName.equals("button", ignoreCase = true) ||
-                        target.getAttribute("role") == "button"
-                    ) {
-                        DomPointerBridge.attachRipple(target, me.clientX.toDouble(), me.clientY.toDouble())
-                        break
-                    }
-                    target = target.parentElement as? HTMLElement
-                }
-            }
+            isPointerDown = true
             sendPointer(e as MouseEvent, PointerEventType.Press)
         })
-        rootContainer.addEventListener("pointermove", { e -> sendPointer(e as MouseEvent, PointerEventType.Move) })
-        rootContainer.addEventListener("pointerup", { e -> sendPointer(e as MouseEvent, PointerEventType.Release) })
+        window.addEventListener("pointermove", { e ->
+            val me = e as? MouseEvent ?: return@addEventListener
+            sendPointer(me, PointerEventType.Move)
+        })
+        window.addEventListener("pointerup", { e ->
+            if (isPointerDown) {
+                isPointerDown = false
+                lastPointerUpTimestamp = window.performance.now()
+                sendPointer(e as MouseEvent, PointerEventType.Release)
+            }
+        })
     }
 
     fun setContent(content: @Composable () -> Unit) {
@@ -383,6 +407,7 @@ internal class DomComposeOwner(
                     CompositionLocalProvider(
                         androidx.compose.ui.window.LocalActiveClipEventsTarget provides { null },
                         androidx.compose.ui.window.LocalDomRootContainer provides rootContainer,
+                        LocalPlatformWindowInsets provides EmptyPlatformWindowInsets,
                         LocalSystemTheme provides SystemTheme.Light,
                         content = content
                     )
@@ -445,7 +470,12 @@ internal class DomComposeOwner(
         val role = mergedConfig?.getOrNull(SemanticsProperties.Role) ?: config?.getOrNull(SemanticsProperties.Role)
         val isButton = role == Role.Button
         val isCheckbox = role == Role.Checkbox
-        val isClickable = isCheckbox || mergedConfig?.contains(SemanticsActions.OnClick) == true || config?.contains(SemanticsActions.OnClick) == true
+        val isRadioButton = role == Role.RadioButton
+        val isSwitch = role == Role.Switch
+        val isTab = role == Role.Tab
+        val hasSetProgress = mergedConfig?.contains(SemanticsActions.SetProgress) == true || config?.contains(SemanticsActions.SetProgress) == true
+        val isSlider = hasSetProgress
+        val isClickable = isCheckbox || isRadioButton || isSwitch || isTab || mergedConfig?.contains(SemanticsActions.OnClick) == true || config?.contains(SemanticsActions.OnClick) == true
         val isInput = config?.contains(SemanticsProperties.EditableText) == true ||
             config?.contains(SemanticsActions.SetText) == true
 
@@ -470,6 +500,8 @@ internal class DomComposeOwner(
                 el.style.color = "inherit"
                 el.style.zIndex = "1"
                 el.style.setProperty("pointer-events", "auto")
+                el.style.setProperty("user-select", "text")
+                el.style.setProperty("-webkit-user-select", "text")
                 DomPointerBridge.bindNodeInput(el as HTMLInputElement) { newText ->
                     activeInputMethodRequest?.onEditCommand?.invoke(
                         listOf(
@@ -507,8 +539,27 @@ internal class DomComposeOwner(
                 el.style.setProperty("overflow", "hidden")
                 el.style.setProperty("pointer-events", "auto")
                 DomPointerBridge.bindNodeClick(el) {
+                    if (window.performance.now() - lastPointerUpTimestamp < 250.0) {
+                        return@bindNodeClick
+                    }
                     node.semanticsConfiguration?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
                         ?: mergedConfig?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
+                    requestLayoutPass()
+                }
+            } else if (isSlider) {
+                el.setAttribute("role", "slider")
+                el.style.cursor = "pointer"
+                el.style.setProperty("pointer-events", "auto")
+                DomPointerBridge.bindContinuousDrag(el) { fraction ->
+                    val rangeInfo = mergedConfig?.getOrNull(SemanticsProperties.ProgressBarRangeInfo)
+                        ?: config?.getOrNull(SemanticsProperties.ProgressBarRangeInfo)
+                    val min = rangeInfo?.range?.start ?: 0f
+                    val max = rangeInfo?.range?.endInclusive ?: 1f
+                    val targetValue = min + fraction * (max - min)
+                    val action = node.semanticsConfiguration?.getOrNull(SemanticsActions.SetProgress)?.action
+                        ?: mergedConfig?.getOrNull(SemanticsActions.SetProgress)?.action
+                    action?.invoke(targetValue)
+                    Snapshot.sendApplyNotifications()
                     requestLayoutPass()
                 }
             } else if (isClickable) {
@@ -516,10 +567,17 @@ internal class DomComposeOwner(
                 el.style.setProperty("pointer-events", "auto")
                 if (isCheckbox) {
                     el.setAttribute("role", "checkbox")
-                    el.style.border = "none"
-                    el.style.background = "transparent"
+                } else if (isRadioButton) {
+                    el.setAttribute("role", "radio")
+                } else if (isSwitch) {
+                    el.setAttribute("role", "switch")
+                } else if (isTab) {
+                    el.setAttribute("role", "tab")
                 }
                 DomPointerBridge.bindNodeClick(el) {
+                    if (window.performance.now() - lastPointerUpTimestamp < 250.0) {
+                        return@bindNodeClick
+                    }
                     node.semanticsConfiguration?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
                         ?: mergedConfig?.getOrNull(SemanticsActions.OnClick)?.action?.invoke()
                     (el.querySelector("input") as? HTMLInputElement)?.focus()
@@ -542,7 +600,7 @@ internal class DomComposeOwner(
             }
             p = p.parent
         }
-        val targetContainer = if (isPopup) rootContainer else (parentEl ?: rootContainer)
+        val targetContainer = parentEl ?: rootContainer
         if (element.parentElement != targetContainer) {
             targetContainer.appendChild(element)
         }
@@ -551,12 +609,62 @@ internal class DomComposeOwner(
             element.setAttribute("role", "checkbox")
             val toggleState = mergedConfig?.getOrNull(SemanticsProperties.ToggleableState)
                 ?: config?.getOrNull(SemanticsProperties.ToggleableState)
+            val isSelected = mergedConfig?.getOrNull(SemanticsProperties.Selected)
+                ?: config?.getOrNull(SemanticsProperties.Selected)
+            val isChecked = if (toggleState != null) {
+                toggleState == androidx.compose.ui.state.ToggleableState.On
+            } else {
+                isSelected == true
+            }
+            element.setAttribute("aria-checked", isChecked.toString())
+            element.setAttribute("data-luta-checked", isChecked.toString())
+            element.style.border = "none"
+            element.style.outline = "none"
+            element.style.background = "transparent"
+        } else if (isRadioButton) {
+            element.setAttribute("role", "radio")
+            val selected = mergedConfig?.getOrNull(SemanticsProperties.Selected)
+                ?: config?.getOrNull(SemanticsProperties.Selected) ?: false
+            element.setAttribute("aria-checked", selected.toString())
+            element.setAttribute("data-luta-checked", selected.toString())
+            element.style.border = "none"
+            element.style.outline = "none"
+            element.style.background = "transparent"
+        } else if (isSwitch) {
+            element.setAttribute("role", "switch")
+            val toggleState = mergedConfig?.getOrNull(SemanticsProperties.ToggleableState)
+                ?: config?.getOrNull(SemanticsProperties.ToggleableState)
             val isChecked = toggleState == androidx.compose.ui.state.ToggleableState.On
             element.setAttribute("aria-checked", isChecked.toString())
             element.setAttribute("data-luta-checked", isChecked.toString())
             element.style.border = "none"
             element.style.outline = "none"
             element.style.background = "transparent"
+        } else if (isTab) {
+            element.setAttribute("role", "tab")
+            val selected = mergedConfig?.getOrNull(SemanticsProperties.Selected)
+                ?: config?.getOrNull(SemanticsProperties.Selected) ?: false
+            element.setAttribute("aria-selected", selected.toString())
+        }
+
+        if (isSlider) {
+            element.setAttribute("role", "slider")
+            val rangeInfo = mergedConfig?.getOrNull(SemanticsProperties.ProgressBarRangeInfo)
+                ?: config?.getOrNull(SemanticsProperties.ProgressBarRangeInfo)
+            if (rangeInfo != null && rangeInfo != androidx.compose.ui.semantics.ProgressBarRangeInfo.Indeterminate) {
+                element.setAttribute("aria-valuemin", rangeInfo.range.start.toString())
+                element.setAttribute("aria-valuemax", rangeInfo.range.endInclusive.toString())
+                element.setAttribute("aria-valuenow", rangeInfo.current.toString())
+            }
+        } else if (mergedConfig?.contains(SemanticsProperties.ProgressBarRangeInfo) == true || config?.contains(SemanticsProperties.ProgressBarRangeInfo) == true) {
+            element.setAttribute("role", "progressbar")
+            val rangeInfo = mergedConfig?.getOrNull(SemanticsProperties.ProgressBarRangeInfo)
+                ?: config?.getOrNull(SemanticsProperties.ProgressBarRangeInfo)
+            if (rangeInfo != null && rangeInfo != androidx.compose.ui.semantics.ProgressBarRangeInfo.Indeterminate) {
+                element.setAttribute("aria-valuemin", rangeInfo.range.start.toString())
+                element.setAttribute("aria-valuemax", rangeInfo.range.endInclusive.toString())
+                element.setAttribute("aria-valuenow", rangeInfo.current.toString())
+            }
         }
 
         if (isInput && element is HTMLInputElement) {
@@ -567,15 +675,13 @@ internal class DomComposeOwner(
         }
 
         val pos = node.outerCoordinator.positionInRoot()
-        val basePos = if (targetContainer == rootContainer || p == null) {
-            Offset.Zero
+        val localOffset = if (targetContainer === rootContainer || p == null) {
+            IntOffset(pos.x.toInt(), pos.y.toInt())
         } else {
-            p.outerCoordinator.positionInRoot()
+            computeLayoutOffsetRelativeToParentOuter(node)
         }
-        val localX = pos.x - basePos.x
-        val localY = pos.y - basePos.y
 
-        element.style.transform = "translate3d(${localX}px, ${localY}px, 0px)"
+        element.style.transform = "translate3d(${localOffset.x}px, ${localOffset.y}px, 0px)"
         element.style.width = "${node.width}px"
         element.style.height = "${node.height}px"
 
@@ -597,22 +703,36 @@ internal class DomComposeOwner(
         }
 
         // Execute drawing operations into the node's element
+        currentDrawingElement = element
+        currentDrawingNode = node
+        currentDrawingNodeHasShadow = false
+        element.style.boxShadow = ""
+        element.style.setProperty("clip-path", "")
+        element.querySelector(":scope > div[data-luta-shadow]")?.let { element.removeChild(it) }
+
         try {
             val domCanvas = DomCanvas(element)
             val outerPos = node.outerCoordinator.position
             domCanvas.translate(-outerPos.x.toFloat(), -outerPos.y.toFloat())
-            node.draw(domCanvas, null)
+            snapshotObserver.observeReads(node, onCommitAffectingDraw) {
+                node.draw(domCanvas, null)
+            }
         } catch (t: Throwable) {
             // Draw will catch up once layout pass finalizes
+        } finally {
+            currentDrawingNode = null
+            currentDrawingElement = null
         }
 
-        if (isCheckbox) {
+        if (isButton) {
+            element.style.border = "none"
+            element.style.outline = "none"
+            element.style.background = "transparent"
+        } else if (isCheckbox || isSwitch || isRadioButton) {
             element.style.border = "none"
             element.style.outline = "none"
             element.style.background = "transparent"
             element.style.setProperty("overflow", "visible")
-        } else if (element.style.borderRadius.isNotEmpty()) {
-            element.style.setProperty("overflow", "hidden")
         }
 
         // Leaf input invariant: native input handles its own text/editing; do not instantiate duplicate children
@@ -746,45 +866,163 @@ internal class DomComposeOwner(
         val transform = Matrix()
         val inverseTransform = Matrix()
         var currentElevation: Float = explicitLayer?.shadowElevation ?: 0f
+        var currentClip: Boolean = false
+        var currentAlpha: Float = 1f
+        var currentShape: Shape? = null
+        var layerSize: IntSize = IntSize.Zero
+        var layerPosition: IntOffset = IntOffset.Zero
+
         return object : OwnedLayer {
             override fun updateLayerProperties(scope: ReusableGraphicsLayerScope) {
                 transform.reset()
+                val px = scope.transformOrigin.pivotFractionX * layerSize.width
+                val py = scope.transformOrigin.pivotFractionY * layerSize.height
+                transform.translate(scope.translationX, scope.translationY)
+                transform.translate(px, py)
                 transform.scale(scope.scaleX, scope.scaleY)
                 transform.rotateZ(scope.rotationZ)
-                transform.translate(scope.translationX, scope.translationY)
-                transform.invertTo(inverseTransform)
+                transform.translate(-px, -py)
+                if (!transform.invertTo(inverseTransform)) {
+                    inverseTransform.reset()
+                }
+
                 currentElevation = if (scope.shadowElevation > 0f) scope.shadowElevation else (explicitLayer?.shadowElevation ?: 0f)
+                currentClip = scope.clip
+                currentAlpha = scope.alpha
+                currentShape = scope.shape
             }
+
             override fun isInLayer(position: Offset): Boolean = true
-            override fun move(position: IntOffset) {}
-            override fun resize(size: IntSize) {}
+
+            override fun move(position: IntOffset) {
+                if (layerPosition != position) {
+                    layerPosition = position
+                    invalidate()
+                }
+            }
+
+            override fun resize(size: IntSize) {
+                layerSize = size
+            }
+
             override fun drawLayer(canvas: Canvas, parentLayer: GraphicsLayer?) {
                 val domCanvas = canvas as? DomCanvas
-                val host = domCanvas?.hostElement
-                if (host != null && currentElevation > 0f) {
-                    val dp = if (density.density > 0f) currentElevation / density.density else currentElevation
-                    val y1 = (dp * 0.5f).toInt().coerceAtLeast(1)
-                    val blur1 = (dp * 1.5f).toInt().coerceAtLeast(2)
-                    val y2 = (dp * 0.8f).toInt().coerceAtLeast(1)
-                    val blur2 = (dp * 2.5f).toInt().coerceAtLeast(3)
-                    host.style.boxShadow = "0px ${y1}px ${blur1}px rgba(0, 0, 0, 0.2), 0px ${y2}px ${blur2}px rgba(0, 0, 0, 0.14)"
+                val host = domCanvas?.hostElement ?: currentDrawingElement
+                val hostW = currentDrawingNode?.width ?: 0
+                val hostH = currentDrawingNode?.height ?: 0
+                val layerW = layerSize.width
+                val layerH = layerSize.height
+
+                val tx = (domCanvas?.translationX ?: 0f) + layerPosition.x.toFloat()
+                val ty = (domCanvas?.translationY ?: 0f) + layerPosition.y.toFloat()
+
+                val isLargeOffset = tx >= 20f || ty >= 20f
+
+                val currentOutline = if (currentShape != null && layerW > 0 && layerH > 0) {
+                    currentShape?.createOutline(layerSize.toSize(), layoutDirection, density)
+                } else null
+
+                val radiusCss = when (currentOutline) {
+                    is Outline.Rounded -> {
+                        val rr = currentOutline.roundRect
+                        "${rr.topLeftCornerRadius.x}px ${rr.topRightCornerRadius.x}px ${rr.bottomRightCornerRadius.x}px ${rr.bottomLeftCornerRadius.x}px"
+                    }
+                    else -> "0px"
                 }
+
+                if (host != null) {
+                    if (currentElevation > 0f) {
+                        currentDrawingNodeHasShadow = true
+                        val dp = if (density.density > 0f) currentElevation / density.density else currentElevation
+                        val y1 = (dp * 0.5f).toInt().coerceAtLeast(1)
+                        val blur1 = (dp * 1.5f).toInt().coerceAtLeast(2)
+                        val y2 = (dp * 0.8f).toInt().coerceAtLeast(1)
+                        val blur2 = (dp * 2.5f).toInt().coerceAtLeast(3)
+                        val shadowCss = "0px ${y1}px ${blur1}px rgba(0, 0, 0, 0.2), 0px ${y2}px ${blur2}px rgba(0, 0, 0, 0.14)"
+
+                        if (isLargeOffset) {
+                            val existingShadow = host.querySelector(":scope > div[data-luta-shadow]") as? HTMLElement
+                            val shadowDiv = existingShadow ?: (document.createElement("div") as HTMLElement).also {
+                                it.setAttribute("data-luta-shadow", "true")
+                                it.style.position = "absolute"
+                                it.style.setProperty("pointer-events", "none")
+                                host.insertBefore(it, host.firstChild)
+                            }
+                            shadowDiv.style.left = "${tx}px"
+                            shadowDiv.style.top = "${ty}px"
+                            shadowDiv.style.width = "${layerW}px"
+                            shadowDiv.style.height = "${layerH}px"
+                            shadowDiv.style.borderRadius = radiusCss
+                            shadowDiv.style.boxShadow = shadowCss
+                            host.style.boxShadow = ""
+                        } else {
+                            host.style.boxShadow = shadowCss
+                            host.style.borderRadius = radiusCss
+                            host.querySelector(":scope > div[data-luta-shadow]")?.let { host.removeChild(it) }
+                        }
+                    }
+
+                    if (currentAlpha < 1f) {
+                        host.style.opacity = currentAlpha.toString()
+                    }
+                }
+
+                canvas.save()
+                canvas.translate(layerPosition.x.toFloat(), layerPosition.y.toFloat())
+
+                if (currentClip) {
+                    domCanvas?.pushLayerClipOutline(currentOutline, layerSize)
+                    if (host != null) {
+                        if (!isLargeOffset) {
+                            host.style.setProperty("overflow", "hidden")
+                            host.style.borderRadius = radiusCss
+                            host.style.setProperty("clip-path", "")
+                        } else if (!currentDrawingNodeHasShadow) {
+                            val top = ty
+                            val left = tx
+                            val right = hostW - (tx + layerW)
+                            val bottom = hostH - (ty + layerH)
+                            host.style.setProperty("overflow", "visible")
+                            host.style.setProperty("clip-path", "inset(${top}px ${right}px ${bottom}px ${left}px round ${radiusCss})")
+                        } else {
+                            host.style.setProperty("overflow", "visible")
+                            host.style.setProperty("clip-path", "")
+                        }
+                    }
+                }
+
                 drawBlock(canvas, parentLayer)
+                canvas.restore()
             }
+
             override fun updateDisplayList() {}
             override fun invalidate() {
                 invalidateParentLayer()
                 requestLayoutPass()
             }
             override fun destroy() {}
-            override fun mapOffset(point: Offset, inverse: Boolean): Offset = point
-            override fun mapBounds(rect: MutableRect, inverse: Boolean) {}
+
+            override fun mapOffset(point: Offset, inverse: Boolean): Offset {
+                return if (inverse) inverseTransform.map(point) else transform.map(point)
+            }
+
+            override fun mapBounds(rect: MutableRect, inverse: Boolean) {
+                if (inverse) inverseTransform.map(rect) else transform.map(rect)
+            }
+
             override fun reuseLayer(drawBlock: (Canvas, GraphicsLayer?) -> Unit, invalidateParentLayer: () -> Unit) {}
-            override fun transform(matrix: Matrix) { matrix.timesAssign(transform) }
+
+            override fun transform(matrix: Matrix) {
+                matrix.timesAssign(transform)
+            }
+
             override val underlyingMatrix: Matrix get() = transform
             override var frameRate: Float = 0f
             override var isFrameRateFromParent: Boolean = false
-            override fun inverseTransform(matrix: Matrix) { matrix.timesAssign(inverseTransform) }
+
+            override fun inverseTransform(matrix: Matrix) {
+                matrix.timesAssign(inverseTransform)
+            }
         }
     }
 
@@ -861,6 +1099,7 @@ internal object DomFrameClock : MonotonicFrameClock {
             val id = window.requestAnimationFrame { time ->
                 val nanos = (time * 1_000_000.0).toLong()
                 val result = runCatching { onFrame(nanos) }
+                Snapshot.sendApplyNotifications()
                 continuation.resumeWith(result)
             }
             continuation.invokeOnCancellation {

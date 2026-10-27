@@ -113,7 +113,7 @@ class DomParagraph(
     override val placeholderRects: List<Rect?> get() = emptyList()
 
     init {
-        val measured = text.length * fontSizePx * 0.55f
+        val measured = text.length * fontSizePx * 0.65f
         maxIntrinsicWidth = measured
         val maxWidth = if (constraints.hasBoundedWidth) constraints.maxWidth.toFloat() else measured
         width = measured.coerceAtMost(maxWidth)
@@ -182,12 +182,15 @@ class DomParagraph(
             ?: (document.createElement("span") as HTMLSpanElement).also {
                 it.setAttribute("data-luta-text", "true")
                 it.style.display = "inline-block"
-                it.style.setProperty("white-space", "pre-wrap")
-                it.style.setProperty("word-break", "break-word")
                 it.style.setProperty("pointer-events", "none")
+                it.style.setProperty("user-select", "none")
+                it.style.setProperty("-webkit-user-select", "none")
                 host.appendChild(it)
             }
 
+        val hasSpaces = text.contains(' ') || text.contains('\n')
+        span.style.setProperty("white-space", if (maxLines == 1 || !hasSpaces) "nowrap" else "pre-wrap")
+        span.style.setProperty("word-break", if (!hasSpaces) "keep-all" else "break-word")
         span.style.font = "${fontSizePx}px sans-serif"
         if (color.isSpecified) {
             span.style.color = color.toCssRgba()
@@ -217,6 +220,6 @@ class DomParagraphIntrinsics(
 ) : ParagraphIntrinsics {
     private val fontSizePx = if (style.fontSize.isSpecified) style.fontSize.value else 16f
     override val minIntrinsicWidth: Float get() = 0f
-    override val maxIntrinsicWidth: Float = text.length * fontSizePx * 0.55f
+    override val maxIntrinsicWidth: Float = text.length * fontSizePx * 0.65f
     override val hasStaleResolvedFonts: Boolean get() = false
 }

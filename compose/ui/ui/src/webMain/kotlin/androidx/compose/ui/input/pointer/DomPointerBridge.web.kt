@@ -89,15 +89,47 @@ internal object DomPointerBridge {
 
     fun bindNodeClick(element: HTMLElement, onClick: () -> Unit) {
         element.style.cursor = "pointer"
-        element.addEventListener("pointerdown", { e ->
-            val me = e as? MouseEvent
-            if (me != null && (element.tagName.equals("button", ignoreCase = true) || element.getAttribute("role") == "button")) {
-                attachRipple(element, me.clientX.toDouble(), me.clientY.toDouble())
-            }
-        })
         element.onclick = { event ->
             onClick()
         }
+    }
+
+    fun bindContinuousDrag(
+        element: HTMLElement,
+        onDrag: (fraction: Float) -> Unit
+    ) {
+        element.style.cursor = "pointer"
+        var isDragging = false
+
+        val computeFraction = { clientX: Double ->
+            val rect = element.getBoundingClientRect()
+            val w = rect.width
+            if (w > 0.0) {
+                val frac = ((clientX - rect.left) / w).coerceIn(0.0, 1.0).toFloat()
+                onDrag(frac)
+            }
+        }
+
+        element.addEventListener("pointerdown", { e ->
+            val me = e as? MouseEvent ?: return@addEventListener
+            isDragging = true
+            computeFraction(me.clientX.toDouble())
+        })
+
+        window.addEventListener("pointermove", { e ->
+            if (isDragging) {
+                val me = e as? MouseEvent ?: return@addEventListener
+                computeFraction(me.clientX.toDouble())
+            }
+        })
+
+        val endDrag: (org.w3c.dom.events.Event) -> Unit = {
+            if (isDragging) {
+                isDragging = false
+            }
+        }
+        window.addEventListener("pointerup", endDrag)
+        window.addEventListener("pointercancel", endDrag)
     }
 
     fun bindNodeInput(element: HTMLInputElement, onInput: (String) -> Unit) {

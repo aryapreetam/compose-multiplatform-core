@@ -60,7 +60,14 @@ internal actual fun actualStampedPathEffect(
     style: StampedPathEffectStyle,
 ): PathEffect = object : PathEffect {}
 
-actual class Shader
+actual class Shader {
+    var cssGradient: String? = null
+
+    constructor()
+    constructor(cssGradient: String?) {
+        this.cssGradient = cssGradient
+    }
+}
 
 internal actual class TransformShader actual constructor() {
     actual var shader: Shader? = null
@@ -73,7 +80,31 @@ internal actual fun ActualLinearGradientShader(
     colors: List<Color>,
     colorStops: List<Float>?,
     tileMode: TileMode,
-): Shader = Shader()
+): Shader {
+    val dx = (to.x - from.x).toDouble()
+    val dy = (to.y - from.y).toDouble()
+    val angle = if (dx == 0.0 && dy == 0.0) {
+        180.0
+    } else {
+        val rad = kotlin.math.atan2(dy, dx)
+        var deg = rad * 180.0 / kotlin.math.PI + 90.0
+        while (deg < 0.0) deg += 360.0
+        while (deg >= 360.0) deg -= 360.0
+        deg
+    }
+
+    val stops = colors.mapIndexed { index, color ->
+        val pct = if (colorStops != null && index < colorStops.size) {
+            (colorStops[index] * 100f).coerceIn(0f, 100f)
+        } else {
+            val count = (colors.size - 1).coerceAtLeast(1)
+            (index.toFloat() / count) * 100f
+        }
+        "${color.toCssRgba()} ${pct}%"
+    }.joinToString(", ")
+
+    return Shader("linear-gradient(${angle.toInt()}deg, $stops)")
+}
 
 internal actual fun ActualRadialGradientShader(
     center: Offset,
@@ -81,13 +112,37 @@ internal actual fun ActualRadialGradientShader(
     colors: List<Color>,
     colorStops: List<Float>?,
     tileMode: TileMode,
-): Shader = Shader()
+): Shader {
+    val stops = colors.mapIndexed { index, color ->
+        val pct = if (colorStops != null && index < colorStops.size) {
+            (colorStops[index] * 100f).coerceIn(0f, 100f)
+        } else {
+            val count = (colors.size - 1).coerceAtLeast(1)
+            (index.toFloat() / count) * 100f
+        }
+        "${color.toCssRgba()} ${pct}%"
+    }.joinToString(", ")
+
+    return Shader("radial-gradient(circle at ${center.x}px ${center.y}px, $stops)")
+}
 
 internal actual fun ActualSweepGradientShader(
     center: Offset,
     colors: List<Color>,
     colorStops: List<Float>?,
-): Shader = Shader()
+): Shader {
+    val stops = colors.mapIndexed { index, color ->
+        val pct = if (colorStops != null && index < colorStops.size) {
+            (colorStops[index] * 100f).coerceIn(0f, 100f)
+        } else {
+            val count = (colors.size - 1).coerceAtLeast(1)
+            (index.toFloat() / count) * 100f
+        }
+        "${color.toCssRgba()} ${pct}%"
+    }.joinToString(", ")
+
+    return Shader("conic-gradient(from 0deg at ${center.x}px ${center.y}px, $stops)")
+}
 
 internal actual fun ActualImageShader(
     image: ImageBitmap,

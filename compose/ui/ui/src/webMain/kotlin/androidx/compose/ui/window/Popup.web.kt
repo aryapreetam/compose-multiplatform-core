@@ -58,13 +58,26 @@ actual class PopupProperties actual constructor(
     actual val dismissOnClickOutside: Boolean,
     actual val clippingEnabled: Boolean,
 ) {
+    var hasScrim: Boolean = false
+
+    constructor(
+        focusable: Boolean = false,
+        dismissOnBackPress: Boolean = true,
+        dismissOnClickOutside: Boolean = true,
+        clippingEnabled: Boolean = true,
+        hasScrim: Boolean = false,
+    ) : this(focusable, dismissOnBackPress, dismissOnClickOutside, clippingEnabled) {
+        this.hasScrim = hasScrim
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is PopupProperties) return false
         return focusable == other.focusable &&
             dismissOnBackPress == other.dismissOnBackPress &&
             dismissOnClickOutside == other.dismissOnClickOutside &&
-            clippingEnabled == other.clippingEnabled
+            clippingEnabled == other.clippingEnabled &&
+            hasScrim == other.hasScrim
     }
 
     override fun hashCode(): Int = 0
@@ -174,9 +187,9 @@ actual fun Popup(
             addEventListener("pointerdown", { it.stopPropagation() })
         }
 
-        // Transparent backdrop listener when dismissOnClickOutside = true to dispatch onDismissRequest
+        // Backdrop listener when dismissOnClickOutside = true or hasScrim = true to dispatch onDismissRequest
         var backdropDiv: HTMLElement? = null
-        if (properties.dismissOnClickOutside) {
+        if (properties.dismissOnClickOutside || properties.hasScrim) {
             backdropDiv = (document.createElement("div") as HTMLElement).apply {
                 setAttribute("data-luta-popup-backdrop", "true")
                 style.position = "fixed"
@@ -185,15 +198,25 @@ actual fun Popup(
                 style.width = "100vw"
                 style.height = "100vh"
                 style.zIndex = "9999"
-                style.background = "transparent"
+                style.background = if (properties.hasScrim) "rgba(0, 0, 0, 0.45)" else "transparent"
                 style.setProperty("pointer-events", "auto")
                 addEventListener("pointerdown", { e ->
                     e.stopPropagation()
-                    currentOnDismiss?.invoke()
+                    if (properties.dismissOnClickOutside) {
+                        currentOnDismiss?.invoke()
+                    }
                 })
             }
             rootContainer.appendChild(backdropDiv)
         }
+
+        val keyListener: (org.w3c.dom.events.Event) -> Unit = { e ->
+            val ke = e as? org.w3c.dom.events.KeyboardEvent
+            if (ke?.key == "Escape" && properties.dismissOnBackPress) {
+                currentOnDismiss?.invoke()
+            }
+        }
+        kotlinx.browser.window.addEventListener("keydown", keyListener)
 
         rootContainer.appendChild(overlayDiv)
 
@@ -239,6 +262,7 @@ actual fun Popup(
                     CompositionLocalProvider(
                         LocalActiveClipEventsTarget provides { null },
                         LocalDomRootContainer provides rootContainer,
+                        androidx.compose.ui.platform.LocalPlatformWindowInsets provides androidx.compose.ui.platform.EmptyPlatformWindowInsets,
                         LocalSystemTheme provides SystemTheme.Light,
                         content = {
                             currentContent()
@@ -251,6 +275,7 @@ actual fun Popup(
         popupOwner.requestLayoutPass()
 
         onDispose {
+            kotlinx.browser.window.removeEventListener("keydown", keyListener)
             onAnchorChanged.value = null
             popupComposition.dispose()
             popupOwner.dispose()

@@ -33,6 +33,8 @@ fun Color.toCssRgba(): String {
     return "rgba($r, $g, $b, $alpha)"
 }
 
+private var globalClipIdCounter = 0
+
 class DomCanvas(
     val hostElement: HTMLElement? = null
 ) : Canvas {
@@ -41,20 +43,33 @@ class DomCanvas(
 
     private var currentTx = 0f
     private var currentTy = 0f
-    private val transformStack = mutableListOf<Offset>()
+    val translationX: Float get() = currentTx
+    val translationY: Float get() = currentTy
+
+    private var defsElement: Element? = null
+    private var currentContainer: Element? = null
+
+    private data class CanvasState(
+        val tx: Float,
+        val ty: Float,
+        val container: Element?
+    )
+    private val stateStack = mutableListOf<CanvasState>()
 
     override fun save() {
-        transformStack.add(Offset(currentTx, currentTy))
+        stateStack.add(CanvasState(currentTx, currentTy, currentContainer))
     }
 
     override fun restore() {
-        if (transformStack.isNotEmpty()) {
-            val prev = transformStack.removeAt(transformStack.lastIndex)
-            currentTx = prev.x
-            currentTy = prev.y
+        if (stateStack.isNotEmpty()) {
+            val state = stateStack.removeAt(stateStack.lastIndex)
+            currentTx = state.tx
+            currentTy = state.ty
+            currentContainer = state.container
         } else {
             currentTx = 0f
             currentTy = 0f
+            currentContainer = null
         }
     }
 
@@ -72,6 +87,76 @@ class DomCanvas(
     override fun skew(sx: Float, sy: Float) {}
     override fun concat(matrix: Matrix) {}
 
+    fun pushLayerClipOutline(outline: Outline?, size: IntSize) {
+        val host = hostElement ?: return
+        val svg = getOrCreateSvg(host)
+        val defs = getOrCreateDefs(svg)
+        val clipId = "luta-clip-${++globalClipIdCounter}"
+        val clipPath = document.createElementNS("http://www.w3.org/2000/svg", "clipPath")
+        clipPath.setAttribute("id", clipId)
+
+        when (outline) {
+            is Outline.Rounded -> {
+                val rr = outline.roundRect
+                val isUniform = rr.topLeftCornerRadius.x == rr.topRightCornerRadius.x &&
+                    rr.topLeftCornerRadius.x == rr.bottomRightCornerRadius.x &&
+                    rr.topLeftCornerRadius.x == rr.bottomLeftCornerRadius.x &&
+                    rr.topLeftCornerRadius.x == rr.topLeftCornerRadius.y
+                if (isUniform) {
+                    val rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
+                    rect.setAttribute("x", (rr.left + currentTx).toString())
+                    rect.setAttribute("y", (rr.top + currentTy).toString())
+                    rect.setAttribute("width", rr.width.toString())
+                    rect.setAttribute("height", rr.height.toString())
+                    rect.setAttribute("rx", rr.topLeftCornerRadius.x.toString())
+                    rect.setAttribute("ry", rr.topLeftCornerRadius.y.toString())
+                    clipPath.appendChild(rect)
+                } else {
+                    val domPath = (outline.roundRectPath as? DomPath) ?: DomPath().apply { addRoundRect(rr) }
+                    val path = document.createElementNS("http://www.w3.org/2000/svg", "path")
+                    path.setAttribute("d", domPath.toSvgPathData())
+                    if (currentTx != 0f || currentTy != 0f) {
+                        path.setAttribute("transform", "translate($currentTx, $currentTy)")
+                    }
+                    clipPath.appendChild(path)
+                }
+            }
+            is Outline.Rectangle -> {
+                val rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
+                rect.setAttribute("x", (outline.rect.left + currentTx).toString())
+                rect.setAttribute("y", (outline.rect.top + currentTy).toString())
+                rect.setAttribute("width", outline.rect.width.toString())
+                rect.setAttribute("height", outline.rect.height.toString())
+                clipPath.appendChild(rect)
+            }
+            is Outline.Generic -> {
+                val domPath = outline.path as? DomPath
+                if (domPath != null) {
+                    val path = document.createElementNS("http://www.w3.org/2000/svg", "path")
+                    path.setAttribute("d", domPath.toSvgPathData())
+                    if (currentTx != 0f || currentTy != 0f) {
+                        path.setAttribute("transform", "translate($currentTx, $currentTy)")
+                    }
+                    clipPath.appendChild(path)
+                }
+            }
+            else -> {
+                val rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
+                rect.setAttribute("x", currentTx.toString())
+                rect.setAttribute("y", currentTy.toString())
+                rect.setAttribute("width", size.width.toString())
+                rect.setAttribute("height", size.height.toString())
+                clipPath.appendChild(rect)
+            }
+        }
+        defs.appendChild(clipPath)
+
+        val g = document.createElementNS("http://www.w3.org/2000/svg", "g")
+        g.setAttribute("clip-path", "url(#$clipId)")
+        targetContainer().appendChild(g)
+        currentContainer = g
+    }
+
     override fun clipRect(left: Float, top: Float, right: Float, bottom: Float, clipOp: ClipOp) {
         val host = hostElement ?: return
         if (clipOp == ClipOp.Difference) {
@@ -79,22 +164,35 @@ class DomCanvas(
             val poly = "polygon(0 0, ${left}px 0, ${left}px ${b}px, ${right}px ${b}px, ${right}px 0, 100% 0, 100% 100%, 0 100%)"
             host.style.setProperty("clip-path", poly)
         } else {
-            host.style.setProperty("overflow", "hidden")
+            pushLayerClipOutline(
+                Outline.Rectangle(Rect(left, top, right, bottom)),
+                IntSize((right - left).toInt(), (bottom - top).toInt())
+            )
         }
     }
 
     override fun clipPath(path: Path, clipOp: ClipOp) {
-        val host = hostElement ?: return
-        host.style.setProperty("overflow", "hidden")
-        val d = (path as? DomPath)?.toSvgPathData()
-        if (!d.isNullOrEmpty()) {
-            host.style.setProperty("clip-path", "path('$d')")
+        pushLayerClipOutline(Outline.Generic(path), IntSize.Zero)
+    }
+
+    private fun targetContainer(): Element {
+        val host = hostElement ?: return document.createElement("div")
+        return currentContainer ?: getOrCreateSvg(host)
+    }
+
+    private fun getOrCreateDefs(svg: Element): Element {
+        val existing = defsElement ?: svg.querySelector(":scope > defs")
+        if (existing != null) {
+            defsElement = existing
+            return existing
         }
+        val defs = document.createElementNS("http://www.w3.org/2000/svg", "defs")
+        svg.insertBefore(defs, svg.firstChild)
+        defsElement = defs
+        return defs
     }
 
     override fun drawLine(p1: Offset, p2: Offset, paint: Paint) {
-        val host = hostElement ?: return
-        val svg = getOrCreateSvg(host)
         val line = document.createElementNS("http://www.w3.org/2000/svg", "line")
         line.setAttribute("x1", (p1.x + currentTx).toString())
         line.setAttribute("y1", (p1.y + currentTy).toString())
@@ -102,7 +200,7 @@ class DomCanvas(
         line.setAttribute("y2", (p2.y + currentTy).toString())
         line.setAttribute("stroke", paint.color.toCssRgba())
         line.setAttribute("stroke-width", paint.strokeWidth.toString())
-        svg.appendChild(line)
+        targetContainer().appendChild(line)
     }
 
     override fun drawRect(left: Float, top: Float, right: Float, bottom: Float, paint: Paint) {
@@ -119,9 +217,33 @@ class DomCanvas(
         } else {
             0.5f
         }
-        val isFullElement = isButton || (!isCheckbox && currentTx == 0f && currentTy == 0f && left <= maxInset && top <= maxInset && (hostW <= 0.0 || right >= (hostW - maxInset - 1.5).toFloat()) && (hostH <= 0.0 || bottom >= (hostH - maxInset - 1.5).toFloat()))
+        val isFullElement = (currentContainer == null && !isCheckbox && currentTx == 0f && currentTy == 0f && left <= maxInset && top <= maxInset && (hostW <= 0.0 || right >= (hostW - maxInset - 1.5).toFloat()) && (hostH <= 0.0 || bottom >= (hostH - maxInset - 1.5).toFloat()))
+        val shaderGradient = paint.shader?.cssGradient
+        if (shaderGradient != null) {
+            if (isFullElement) {
+                host.style.background = shaderGradient
+                host.setAttribute("data-luta-gradient", "true")
+                if (paint.alpha < 1f) {
+                    host.style.opacity = paint.alpha.toString()
+                }
+            } else {
+                val existingGrad = host.querySelector(":scope > div[data-luta-gradient]") as? HTMLElement
+                val gradDiv = existingGrad ?: (document.createElement("div") as HTMLElement).also {
+                    it.setAttribute("data-luta-gradient", "true")
+                    it.style.position = "absolute"
+                    it.style.setProperty("pointer-events", "none")
+                    host.appendChild(it)
+                }
+                gradDiv.style.left = "${left + currentTx}px"
+                gradDiv.style.top = "${top + currentTy}px"
+                gradDiv.style.width = "${right - left}px"
+                gradDiv.style.height = "${bottom - top}px"
+                gradDiv.style.background = shaderGradient
+                if (paint.alpha < 1f) gradDiv.style.opacity = paint.alpha.toString()
+            }
+            return
+        }
         if (!isFullElement) {
-            val svg = getOrCreateSvg(host)
             val rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
             val x = left + currentTx
             val y = top + currentTy
@@ -142,7 +264,7 @@ class DomCanvas(
                     rect.setAttribute("stroke", "none")
                 }
             }
-            svg.appendChild(rect)
+            targetContainer().appendChild(rect)
             return
         }
         if (paint.color != Color.Unspecified) {
@@ -177,9 +299,36 @@ class DomCanvas(
         } else {
             0.5f
         }
-        val isFullElement = isButton || (!isCheckbox && currentTx == 0f && currentTy == 0f && left <= maxInset && top <= maxInset && (hostW <= 0.0 || right >= (hostW - maxInset - 1.5).toFloat()) && (hostH <= 0.0 || bottom >= (hostH - maxInset - 1.5).toFloat()))
+        val isFullElement = (currentContainer == null && !isCheckbox && currentTx == 0f && currentTy == 0f && left <= maxInset && top <= maxInset && (hostW <= 0.0 || right >= (hostW - maxInset - 1.5).toFloat()) && (hostH <= 0.0 || bottom >= (hostH - maxInset - 1.5).toFloat()))
+        val shaderGradient = paint.shader?.cssGradient
+        if (shaderGradient != null) {
+            if (isFullElement) {
+                host.style.background = shaderGradient
+                host.setAttribute("data-luta-gradient", "true")
+                host.style.borderRadius = "${radiusX}px"
+                host.style.setProperty("overflow", "hidden")
+                if (paint.alpha < 1f) {
+                    host.style.opacity = paint.alpha.toString()
+                }
+            } else {
+                val existingGrad = host.querySelector(":scope > div[data-luta-gradient]") as? HTMLElement
+                val gradDiv = existingGrad ?: (document.createElement("div") as HTMLElement).also {
+                    it.setAttribute("data-luta-gradient", "true")
+                    it.style.position = "absolute"
+                    it.style.setProperty("pointer-events", "none")
+                    host.appendChild(it)
+                }
+                gradDiv.style.left = "${left + currentTx}px"
+                gradDiv.style.top = "${top + currentTy}px"
+                gradDiv.style.width = "${right - left}px"
+                gradDiv.style.height = "${bottom - top}px"
+                gradDiv.style.borderRadius = "${radiusX}px"
+                gradDiv.style.background = shaderGradient
+                if (paint.alpha < 1f) gradDiv.style.opacity = paint.alpha.toString()
+            }
+            return
+        }
         if (!isFullElement) {
-            val svg = getOrCreateSvg(host)
             val rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
             val x = left + currentTx
             val y = top + currentTy
@@ -202,7 +351,7 @@ class DomCanvas(
                     rect.setAttribute("stroke", "none")
                 }
             }
-            svg.appendChild(rect)
+            targetContainer().appendChild(rect)
             return
         }
         if (paint.color != Color.Unspecified) {
@@ -222,7 +371,6 @@ class DomCanvas(
         if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
             return
         }
-        val svg = getOrCreateSvg(host)
         val ellipse = document.createElementNS("http://www.w3.org/2000/svg", "ellipse")
         val cx = (left + right) / 2f + currentTx
         val cy = (top + bottom) / 2f + currentTy
@@ -244,7 +392,7 @@ class DomCanvas(
         if (paint.alpha < 1f) {
             ellipse.setAttribute("opacity", paint.alpha.toString())
         }
-        svg.appendChild(ellipse)
+        targetContainer().appendChild(ellipse)
     }
 
     override fun drawCircle(center: Offset, radius: Float, paint: Paint) {
@@ -252,7 +400,6 @@ class DomCanvas(
         if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
             return
         }
-        val svg = getOrCreateSvg(host)
         val circle = document.createElementNS("http://www.w3.org/2000/svg", "circle")
         val cx = center.x + currentTx
         val cy = center.y + currentTy
@@ -271,7 +418,7 @@ class DomCanvas(
         if (paint.alpha < 1f) {
             circle.setAttribute("opacity", paint.alpha.toString())
         }
-        svg.appendChild(circle)
+        targetContainer().appendChild(circle)
     }
 
     override fun drawArc(
@@ -283,14 +430,77 @@ class DomCanvas(
         sweepAngle: Float,
         useCenter: Boolean,
         paint: Paint,
-    ) {}
+    ) {
+        val host = hostElement ?: return
+        if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
+            return
+        }
+        val rx = (right - left) / 2f
+        val ry = (bottom - top) / 2f
+        val cx = left + rx + currentTx
+        val cy = top + ry + currentTy
+
+        if (kotlin.math.abs(sweepAngle) >= 360f) {
+            val ellipse = document.createElementNS("http://www.w3.org/2000/svg", "ellipse")
+            ellipse.setAttribute("cx", cx.toString())
+            ellipse.setAttribute("cy", cy.toString())
+            ellipse.setAttribute("rx", rx.toString())
+            ellipse.setAttribute("ry", ry.toString())
+            if (paint.style == PaintingStyle.Stroke) {
+                ellipse.setAttribute("fill", "none")
+                ellipse.setAttribute("stroke", paint.color.toCssRgba())
+                val sw = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
+                ellipse.setAttribute("stroke-width", sw.toString())
+            } else {
+                ellipse.setAttribute("fill", paint.color.toCssRgba())
+                ellipse.setAttribute("stroke", "none")
+            }
+            targetContainer().appendChild(ellipse)
+            return
+        }
+
+        val startRad = startAngle * kotlin.math.PI / 180.0
+        val endRad = (startAngle + sweepAngle) * kotlin.math.PI / 180.0
+
+        val x1 = cx + rx * kotlin.math.cos(startRad).toFloat()
+        val y1 = cy + ry * kotlin.math.sin(startRad).toFloat()
+        val x2 = cx + rx * kotlin.math.cos(endRad).toFloat()
+        val y2 = cy + ry * kotlin.math.sin(endRad).toFloat()
+
+        val largeArc = if (kotlin.math.abs(sweepAngle) > 180f) 1 else 0
+        val sweep = if (sweepAngle > 0f) 1 else 0
+
+        val d = if (useCenter) {
+            "M $cx $cy L $x1 $y1 A $rx $ry 0 $largeArc $sweep $x2 $y2 Z"
+        } else {
+            "M $x1 $y1 A $rx $ry 0 $largeArc $sweep $x2 $y2"
+        }
+
+        val pathElement = document.createElementNS("http://www.w3.org/2000/svg", "path")
+        pathElement.setAttribute("d", d)
+        if (paint.style == PaintingStyle.Stroke) {
+            pathElement.setAttribute("fill", "none")
+            pathElement.setAttribute("stroke", paint.color.toCssRgba())
+            val sw = if (paint.strokeWidth > 0f) paint.strokeWidth else 1f
+            pathElement.setAttribute("stroke-width", sw.toString())
+            val cap = when (paint.strokeCap) {
+                StrokeCap.Round -> "round"
+                StrokeCap.Square -> "square"
+                else -> "butt"
+            }
+            pathElement.setAttribute("stroke-linecap", cap)
+        } else {
+            pathElement.setAttribute("fill", paint.color.toCssRgba())
+            pathElement.setAttribute("stroke", "none")
+        }
+        targetContainer().appendChild(pathElement)
+    }
 
     override fun drawPath(path: Path, paint: Paint) {
         val host = hostElement ?: return
         if (paint.color != Color.Unspecified && paint.style != PaintingStyle.Stroke && paint.color.alpha <= 0.001f) {
             return
         }
-        val svg = getOrCreateSvg(host)
         val pathElement = document.createElementNS("http://www.w3.org/2000/svg", "path")
         val d = (path as? DomPath)?.toSvgPathData() ?: ""
         pathElement.setAttribute("d", d)
@@ -318,7 +528,7 @@ class DomCanvas(
             pathElement.setAttribute("fill", paint.color.toCssRgba())
             pathElement.setAttribute("stroke", "none")
         }
-        svg.appendChild(pathElement)
+        targetContainer().appendChild(pathElement)
     }
 
     override fun drawImage(image: ImageBitmap, topLeftOffset: Offset, paint: Paint) {
@@ -377,6 +587,7 @@ class DomCanvas(
             it.style.width = "100%"
             it.style.height = "100%"
             it.style.setProperty("pointer-events", "none")
+            it.style.setProperty("overflow", "visible")
             host.appendChild(it)
         }
     }

@@ -18,22 +18,69 @@ package androidx.compose.ui.window
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
-import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 
-actual class DialogProperties actual constructor(
-    actual val dismissOnBackPress: Boolean,
-    actual val dismissOnClickOutside: Boolean,
-    actual val usePlatformDefaultWidth: Boolean,
+private val DefaultScrimColor = Color(0f, 0f, 0f, 0.6f)
+
+@Immutable
+actual class DialogProperties constructor(
+    actual val dismissOnBackPress: Boolean = true,
+    actual val dismissOnClickOutside: Boolean = true,
+    actual val usePlatformDefaultWidth: Boolean = true,
+    val usePlatformInsets: Boolean = true,
+    val useSoftwareKeyboardInset: Boolean = true,
+    val scrimColor: Color = DefaultScrimColor,
 ) {
+    actual constructor(
+        dismissOnBackPress: Boolean,
+        dismissOnClickOutside: Boolean,
+        usePlatformDefaultWidth: Boolean,
+    ) : this(
+        dismissOnBackPress = dismissOnBackPress,
+        dismissOnClickOutside = dismissOnClickOutside,
+        usePlatformDefaultWidth = usePlatformDefaultWidth,
+        usePlatformInsets = true,
+        useSoftwareKeyboardInset = true,
+        scrimColor = DefaultScrimColor,
+    )
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is DialogProperties) return false
         return dismissOnBackPress == other.dismissOnBackPress &&
             dismissOnClickOutside == other.dismissOnClickOutside &&
-            usePlatformDefaultWidth == other.usePlatformDefaultWidth
+            usePlatformDefaultWidth == other.usePlatformDefaultWidth &&
+            usePlatformInsets == other.usePlatformInsets &&
+            useSoftwareKeyboardInset == other.useSoftwareKeyboardInset &&
+            scrimColor == other.scrimColor
     }
 
-    override fun hashCode(): Int = 0
+    override fun hashCode(): Int {
+        var result = dismissOnBackPress.hashCode()
+        result = 31 * result + dismissOnClickOutside.hashCode()
+        result = 31 * result + usePlatformDefaultWidth.hashCode()
+        result = 31 * result + usePlatformInsets.hashCode()
+        result = 31 * result + useSoftwareKeyboardInset.hashCode()
+        result = 31 * result + scrimColor.hashCode()
+        return result
+    }
+}
+
+internal object DialogPositionProvider : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val x = ((windowSize.width - popupContentSize.width) / 2).coerceAtLeast(0)
+        val y = ((windowSize.height - popupContentSize.height) / 2).coerceAtLeast(0)
+        return IntOffset(x, y)
+    }
 }
 
 @Composable
@@ -42,12 +89,16 @@ actual fun Dialog(
     properties: DialogProperties,
     content: @Composable () -> Unit,
 ) {
-    Layout(content = content) { measurables, constraints ->
-        val placeables = measurables.map { it.measure(constraints) }
-        val width = placeables.maxOfOrNull { it.width } ?: 0
-        val height = placeables.maxOfOrNull { it.height } ?: 0
-        layout(width, height) {
-            placeables.forEach { it.placeRelative(0, 0) }
-        }
-    }
+    Popup(
+        popupPositionProvider = DialogPositionProvider,
+        onDismissRequest = onDismissRequest,
+        properties = PopupProperties(
+            focusable = true,
+            dismissOnClickOutside = properties.dismissOnClickOutside,
+            dismissOnBackPress = properties.dismissOnBackPress,
+            clippingEnabled = false,
+            hasScrim = true
+        ),
+        content = content
+    )
 }
